@@ -1,0 +1,29 @@
+# Built artifacts
+*.apk
+*.aar
+*.aab
+*.ap_
+
+# Gradle
+.gradle/
+build/
+out/
+.kotlin/
+
+# Local config (contains SDK path)
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+captures/
+
+# Keystore (never commit)
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
