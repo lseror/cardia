@@ -38,8 +38,20 @@ class SettingsStore(ctx: Context) {
         get() = prefs.getString(KEY_SERVER_URL, "").orEmpty()
         set(value) = prefs.edit { putString(KEY_SERVER_URL, value.trim().trimEnd('/')) }
 
+    /** Quota journalier associé à la clé (informatif, renvoyé à l'enregistrement). */
+    var dailyLimit: Int
+        get() = prefs.getInt(KEY_DAILY_LIMIT, 0)
+        set(value) = prefs.edit { putInt(KEY_DAILY_LIMIT, value) }
+
+    /** Efface la licence (pour réactiver avec un nouveau code). */
+    fun clearLicense() = prefs.edit {
+        remove(KEY_LICENSE)
+        remove(KEY_DAILY_LIMIT)
+    }
+
     companion object {
         private const val KEY_LICENSE = "license_key"
         private const val KEY_SERVER_URL = "server_url"
+        private const val KEY_DAILY_LIMIT = "daily_limit"
     }
 }
