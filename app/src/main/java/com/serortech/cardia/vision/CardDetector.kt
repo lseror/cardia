@@ -2,20 +2,25 @@ package com.serortech.cardia.vision
 
 import android.content.Context
 import android.util.Base64
-import com.serortech.cardia.settings.ApiKeyStore
+import com.serortech.cardia.settings.SettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class DetectionException(message: String) : Exception(message)
 
-/** Détecte via OpenAI vision si une carte à collectionner est présente dans l'image. */
+/**
+ * Détecte si une carte à collectionner est visible dans l'image.
+ *
+ * L'app ne porte aucune clé IA : elle envoie l'image + sa clé de licence au
+ * serveur (POST /detect), qui appelle le provider vision et renvoie {card}.
+ */
 class CardDetector(private val ctx: Context) {
 
     private val client = OkHttpClient.Builder()
@@ -24,54 +29,40 @@ class CardDetector(private val ctx: Context) {
         .build()
 
     suspend fun detect(jpeg: ByteArray): Boolean = withContext(Dispatchers.IO) {
-        val key = ApiKeyStore(ctx).openAiKey
-        if (key.isBlank()) throw DetectionException("Aucune clé OpenAI. Renseigne-la dans les Réglages.")
+        val settings = SettingsStore(ctx)
+        val license = settings.licenseKey
+        val baseUrl = settings.serverUrl
+        if (baseUrl.isBlank()) throw DetectionException("URL du serveur absente. Renseigne-la dans les Réglages.")
+        if (license.isBlank()) throw DetectionException("Clé de licence absente. Renseigne-la dans les Réglages.")
 
         val b64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
-        val userContent = JSONArray().apply {
-            put(JSONObject().put("type", "text").put("text", "Analyse cette image."))
-            put(
-                JSONObject().put("type", "image_url").put(
-                    "image_url",
-                    JSONObject().put("url", "data:image/jpeg;base64,$b64"),
-                ),
-            )
-        }
         val payload = JSONObject().apply {
-            put("model", MODEL)
-            put("response_format", JSONObject().put("type", "json_object"))
-            put("messages", JSONArray().apply {
-                put(JSONObject().put("role", "system").put("content", PROMPT))
-                put(JSONObject().put("role", "user").put("content", userContent))
+            put("image", JSONObject().apply {
+                put("kind", "base64")
+                put("mediaType", "image/jpeg")
+                put("data", b64)
             })
         }
         val req = Request.Builder()
-            .url("https://api.openai.com/v1/chat/completions")
-            .addHeader("Authorization", "Bearer $key")
+            .url("$baseUrl/detect")
+            .addHeader("Authorization", "Bearer $license")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        client.newCall(req).execute().use { resp ->
-            val raw = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val msg = runCatching { JSONObject(raw).getJSONObject("error").getString("message") }
-                    .getOrNull() ?: "HTTP ${resp.code}"
-                throw DetectionException("Détection : $msg")
-            }
-            val content = runCatching {
-                JSONObject(raw).getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").getString("content")
-            }.getOrElse { throw DetectionException("Réponse inattendue.") }
-            runCatching { JSONObject(content).optBoolean("card", false) }.getOrDefault(false)
+        val resp = try {
+            client.newCall(req).execute()
+        } catch (e: IOException) {
+            throw DetectionException("Serveur injoignable : ${e.message}")
         }
-    }
-
-    companion object {
-        private const val MODEL = "gpt-4o-mini"
-        private val PROMPT = """
-            Tu détermines si une carte à collectionner (type Pokémon / carte à jouer TCG)
-            est bien visible dans l'image. Réponds uniquement en JSON : {"card": true} si
-            une carte est présente et identifiable comme telle, sinon {"card": false}.
-        """.trimIndent()
+        resp.use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                val msg = runCatching { JSONObject(raw).getString("error") }
+                    .getOrNull() ?: "HTTP ${it.code}"
+                throw DetectionException(msg)
+            }
+            runCatching { JSONObject(raw).optBoolean("card", false) }
+                .getOrElse { throw DetectionException("Réponse inattendue du serveur.") }
+        }
     }
 }

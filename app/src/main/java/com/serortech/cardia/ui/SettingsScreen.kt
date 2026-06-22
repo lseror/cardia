@@ -31,18 +31,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import com.serortech.cardia.settings.ApiKeyStore
+import com.serortech.cardia.settings.SettingsStore
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
-    val store = remember { ApiKeyStore(ctx) }
+    val store = remember { SettingsStore(ctx) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
-    var openAiKey by remember { mutableStateOf(store.openAiKey) }
+    var serverUrl by remember { mutableStateOf(store.serverUrl) }
+    var licenseKey by remember { mutableStateOf(store.licenseKey) }
     var showKey by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -63,10 +64,19 @@ fun SettingsScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             OutlinedTextField(
-                value = openAiKey,
-                onValueChange = { openAiKey = it },
-                label = { Text("Clé OpenAI") },
-                supportingText = { Text("Pour la détection de carte (vision).") },
+                value = serverUrl,
+                onValueChange = { serverUrl = it },
+                label = { Text("URL du serveur") },
+                supportingText = { Text("Ex. http://10.0.0.13:8787 — c'est le serveur qui appelle l'IA.") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+            OutlinedTextField(
+                value = licenseKey,
+                onValueChange = { licenseKey = it },
+                label = { Text("Clé de licence") },
+                supportingText = { Text("Fournie par l'administrateur du serveur. L'app ne porte aucune clé IA.") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -80,8 +90,9 @@ fun SettingsScreen(onBack: () -> Unit) {
             )
             Button(
                 onClick = {
-                    store.openAiKey = openAiKey
-                    scope.launch { snackbar.showSnackbar("Clé enregistrée") }
+                    store.serverUrl = serverUrl
+                    store.licenseKey = licenseKey
+                    scope.launch { snackbar.showSnackbar("Réglages enregistrés") }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Enregistrer") }
