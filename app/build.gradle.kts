@@ -12,8 +12,14 @@ android {
         applicationId = "com.serortech.cardia"
         minSdk = 29
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.0.5"
+        versionCode = 6
+        versionName = "0.0.6"
+
+        ndk {
+            // OpenCV natif : arm64-v8a uniquement (téléphones réels). Le .so x86_64
+            // pèse ~55 Mo et ne sert qu'aux émulateurs — exclu pour ne pas doubler l'APK.
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
@@ -55,5 +61,6 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+    implementation(libs.opencv)
     debugImplementation(libs.androidx.ui.tooling)
 }

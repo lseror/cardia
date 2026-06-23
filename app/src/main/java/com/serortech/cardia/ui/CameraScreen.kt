@@ -6,13 +6,16 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +39,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,15 +48,22 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.serortech.cardia.vision.CardDetector
+import com.serortech.cardia.vision.CardOutlineDetector
+import com.serortech.cardia.vision.CardQuad
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
+import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +73,10 @@ fun CameraScreen(onSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val detector = remember { CardDetector(ctx) }
+    val outlineDetector = remember { CardOutlineDetector() }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
+
     val imageCapture = remember {
         ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
     }
@@ -79,6 +94,7 @@ fun CameraScreen(onSettings: () -> Unit) {
 
     var analyzing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<Boolean?>(null) }
+    var quad by remember { mutableStateOf<CardQuad?>(null) }
 
     fun analyze() {
         if (analyzing) return
@@ -126,25 +142,46 @@ fun CameraScreen(onSettings: () -> Unit) {
             } else {
                 AndroidView(
                     factory = { c ->
-                        val previewView = PreviewView(c)
+                        val previewView = PreviewView(c).apply {
+                            scaleType = PreviewView.ScaleType.FIT_CENTER
+                        }
                         val future = ProcessCameraProvider.getInstance(c)
                         future.addListener({
                             val provider = future.get()
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
+                            val preview = Preview.Builder()
+                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                                .build()
+                                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                            val analysis = ImageAnalysis.Builder()
+                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+                                .also { ia ->
+                                    ia.setAnalyzer(analysisExecutor) { image ->
+                                        try {
+                                            quad = outlineDetector.detect(image)
+                                        } catch (_: Throwable) {
+                                            // une frame ratée ne doit jamais casser le flux
+                                        } finally {
+                                            image.close()
+                                        }
+                                    }
+                                }
                             provider.unbindAll()
                             provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
                                 imageCapture,
+                                analysis,
                             )
                         }, ContextCompat.getMainExecutor(c))
                         previewView
                     },
                     modifier = Modifier.fillMaxSize().clickable { analyze() },
                 )
+
+                CardOutlineOverlay(quad = quad, modifier = Modifier.fillMaxSize())
 
                 IconButton(
                     onClick = onSettings,
@@ -160,6 +197,24 @@ fun CameraScreen(onSettings: () -> Unit) {
                 )
             }
         }
+    }
+}
+
+/** Trace le quadrilatère détecté, mappé sur la vue (PreviewView en FIT_CENTER). */
+@Composable
+private fun CardOutlineOverlay(quad: CardQuad?, modifier: Modifier) {
+    if (quad == null || quad.corners.size != 4) return
+    Canvas(modifier = modifier) {
+        val s = min(size.width / quad.srcWidth, size.height / quad.srcHeight)
+        val dx = (size.width - quad.srcWidth * s) / 2f
+        val dy = (size.height - quad.srcHeight * s) / 2f
+        val pts = quad.corners.map { Offset(it.x * s + dx, it.y * s + dy) }
+        val path = Path().apply {
+            moveTo(pts[0].x, pts[0].y)
+            for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+            close()
+        }
+        drawPath(path, color = Color(0xFF00E676), style = Stroke(width = 6f))
     }
 }
 
