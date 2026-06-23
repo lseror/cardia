@@ -12,8 +12,8 @@ android {
         applicationId = "com.serortech.cardia"
         minSdk = 29
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.0.6"
+        versionCode = 7
+        versionName = "0.0.7"
 
         ndk {
             // OpenCV natif : arm64-v8a uniquement (téléphones réels). Le .so x86_64

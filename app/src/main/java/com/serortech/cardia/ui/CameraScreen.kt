@@ -60,6 +60,7 @@ import androidx.core.content.ContextCompat
 import com.serortech.cardia.vision.CardDetector
 import com.serortech.cardia.vision.CardOutlineDetector
 import com.serortech.cardia.vision.CardQuad
+import com.serortech.cardia.vision.OutlineResult
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
@@ -94,7 +95,8 @@ fun CameraScreen(onSettings: () -> Unit) {
 
     var analyzing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<Boolean?>(null) }
-    var quad by remember { mutableStateOf<CardQuad?>(null) }
+    var diag by remember { mutableStateOf<OutlineResult?>(null) }
+    var frames by remember { mutableStateOf(0) }
 
     fun analyze() {
         if (analyzing) return
@@ -159,9 +161,8 @@ fun CameraScreen(onSettings: () -> Unit) {
                                 .also { ia ->
                                     ia.setAnalyzer(analysisExecutor) { image ->
                                         try {
-                                            quad = outlineDetector.detect(image)
-                                        } catch (_: Throwable) {
-                                            // une frame ratée ne doit jamais casser le flux
+                                            diag = outlineDetector.detect(image)
+                                            frames++
                                         } finally {
                                             image.close()
                                         }
@@ -181,7 +182,13 @@ fun CameraScreen(onSettings: () -> Unit) {
                     modifier = Modifier.fillMaxSize().clickable { analyze() },
                 )
 
-                CardOutlineOverlay(quad = quad, modifier = Modifier.fillMaxSize())
+                CardOutlineOverlay(quad = diag?.quad, modifier = Modifier.fillMaxSize())
+
+                DebugHud(
+                    diag = diag,
+                    frames = frames,
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                )
 
                 IconButton(
                     onClick = onSettings,
@@ -215,6 +222,24 @@ private fun CardOutlineOverlay(quad: CardQuad?, modifier: Modifier) {
             close()
         }
         drawPath(path, color = Color(0xFF00E676), style = Stroke(width = 6f))
+    }
+}
+
+/** HUD de debug : état OpenCV / frames analysées / contours / meilleur candidat. */
+@Composable
+private fun DebugHud(diag: OutlineResult?, frames: Int, modifier: Modifier) {
+    val text = if (diag == null) {
+        "init…  f$frames"
+    } else buildString {
+        append(if (diag.ocvLoaded) "OCV✓" else "OCV✗")
+        append("  f").append(frames)
+        append("  cnt").append(diag.contourCount)
+        append("  ").append(diag.bestAreaPct).append("%")
+        append("  r").append(String.format("%.2f", diag.bestRatio))
+        diag.error?.takeIf { it.isNotBlank() }?.let { append("  ⚠ ").append(it.take(40)) }
+    }
+    Box(modifier = modifier.background(Color(0xAA000000)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Text(text, color = Color(0xFFFFEB3B), style = MaterialTheme.typography.labelSmall)
     }
 }
 
