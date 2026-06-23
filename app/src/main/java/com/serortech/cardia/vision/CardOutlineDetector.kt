@@ -5,40 +5,46 @@ import androidx.camera.core.ImageProxy
 import org.opencv.android.OpenCVLoader
 import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.MatOfByte
+import org.opencv.core.MatOfInt
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
+import org.opencv.core.Scalar
 import org.opencv.core.Size
+import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import kotlin.math.max
 import kotlin.math.min
 
 /** Quadrilatère détecté, exprimé dans l'image « droite » (orientation d'affichage). */
 data class CardQuad(
-    val corners: List<PointF>, // 4 coins, en pixels de l'image droite
+    val corners: List<PointF>,
     val srcWidth: Int,
     val srcHeight: Int,
 )
 
-/** Résultat enrichi (avec diagnostics pour le HUD de debug). */
+/** Résultat enrichi (diagnostics pour le HUD + frame de debug optionnelle). */
 data class OutlineResult(
     val quad: CardQuad?,
     val ocvLoaded: Boolean,
     val contourCount: Int,
-    val bestAreaPct: Int,   // aire du meilleur candidat, en % de la frame
-    val bestRatio: Float,   // ratio min/max côtés du meilleur candidat
+    val bestAreaPct: Int,
+    val bestRatio: Float,
     val error: String?,
+    val debugJpeg: ByteArray? = null, // image traitée (gris ~480px) + box dessinée
 )
 
 /**
  * Détecte le contour d'une carte EN LOCAL (OpenCV), sans réseau ni IA.
- * On prend le plus grand contour suffisamment grand dont le rectangle englobant
- * (minAreaRect) a un ratio proche d'une carte, et on renvoie ses 4 coins.
+ * Plus grand contour suffisamment grand dont le minAreaRect a un ratio ~carte.
  */
 class CardOutlineDetector {
 
-    fun detect(image: ImageProxy): OutlineResult {
-        val loaded = ensureLoaded()
-        if (!loaded) return OutlineResult(null, false, 0, 0, 0f, "OpenCV non chargé")
+    fun detect(image: ImageProxy, encodeDebug: Boolean = false): OutlineResult {
+        if (!ensureLoaded()) {
+            return OutlineResult(null, false, 0, 0, 0f, "OpenCV non chargé")
+        }
 
         val w = image.width
         val h = image.height
@@ -51,7 +57,7 @@ class CardOutlineDetector {
         val hierarchy = Mat()
         val contours = ArrayList<MatOfPoint>()
         try {
-            // --- Plan Y (luminance) -> Mat gris, robuste au rowStride/padding ---
+            // Plan Y -> Mat gris, robuste au rowStride/padding.
             val yPlane = image.planes[0]
             val rowStride = yPlane.rowStride
             val buf = yPlane.buffer
@@ -62,11 +68,9 @@ class CardOutlineDetector {
             buf.get(data, 0, needed)
             val padded = Mat(rows, rowStride, CvType.CV_8UC1)
             padded.put(0, 0, data)
-            val gray = padded.submat(0, rows, 0, w) // retire le padding -> w x rows
-            gray.copyTo(full)
+            padded.submat(0, rows, 0, w).copyTo(full)
             padded.release()
 
-            // Sous-échantillonnage (~480 px de large) pour la vitesse.
             val targetW = 480
             val scale = if (w > targetW) targetW.toFloat() / w else 1f
             if (scale < 1f) {
@@ -89,10 +93,8 @@ class CardOutlineDetector {
             val imgArea = (small.width() * small.height()).toDouble()
             var bestCardArea = 0.0
             var bestRect: org.opencv.core.RotatedRect? = null
-            // Diagnostics : meilleur candidat par aire, tous ratios confondus.
             var diagArea = 0.0
             var diagRatio = 0f
-
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
                 if (area < MIN_AREA_RATIO * imgArea) continue
@@ -111,25 +113,36 @@ class CardOutlineDetector {
             }
 
             val bestAreaPct = if (imgArea > 0) (diagArea / imgArea * 100).toInt() else 0
-            val rect = bestRect
-                ?: return OutlineResult(null, true, contours.size, bestAreaPct, diagRatio, null)
 
-            // 4 coins du rectangle (échelle réduite) -> capteur -> image droite.
-            val box = Mat()
-            Imgproc.boxPoints(rect, box)
-            val inv = 1f / scale
-            val (uw, uh) = if (rotation == 90 || rotation == 270) h to w else w to h
-            val corners = (0 until 4).map { i ->
-                val sx = (box.get(i, 0)[0] * inv).toFloat()
-                val sy = (box.get(i, 1)[0] * inv).toFloat()
-                rotatePoint(sx, sy, rotation, w, h)
+            var quad: CardQuad? = null
+            var quadRatio = diagRatio
+            val rect = bestRect
+            if (rect != null) {
+                val box = Mat()
+                Imgproc.boxPoints(rect, box)
+                val reduced = (0 until 4).map { Point(box.get(it, 0)[0], box.get(it, 1)[0]) }
+                box.release()
+                if (encodeDebug) {
+                    Imgproc.polylines(small, listOf(MatOfPoint(*reduced.toTypedArray())), true, Scalar(255.0), 2)
+                }
+                val inv = 1f / scale
+                val (uw, uh) = if (rotation == 90 || rotation == 270) h to w else w to h
+                val corners = reduced.map { p ->
+                    rotatePoint((p.x * inv).toFloat(), (p.y * inv).toFloat(), rotation, w, h)
+                }
+                quad = CardQuad(corners, uw, uh)
+                quadRatio = (min(rect.size.width, rect.size.height) / max(rect.size.width, rect.size.height)).toFloat()
             }
-            box.release()
-            return OutlineResult(
-                CardQuad(corners, uw, uh), true, contours.size, bestAreaPct,
-                (min(rect.size.width, rect.size.height) / max(rect.size.width, rect.size.height)).toFloat(),
-                null,
-            )
+
+            var debugJpeg: ByteArray? = null
+            if (encodeDebug) {
+                val out = MatOfByte()
+                Imgcodecs.imencode(".jpg", small, out, MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 70))
+                debugJpeg = out.toArray()
+                out.release()
+            }
+
+            return OutlineResult(quad, true, contours.size, bestAreaPct, quadRatio, null, debugJpeg)
         } catch (t: Throwable) {
             return OutlineResult(null, true, 0, 0, 0f, t.javaClass.simpleName + ": " + (t.message ?: ""))
         } finally {
@@ -146,8 +159,8 @@ class CardOutlineDetector {
     }
 
     companion object {
-        private const val MIN_AREA_RATIO = 0.05 // carte >= 5% de la frame
-        private const val MIN_RATIO = 0.45f      // ratio carte ~0,714 ; marge perspective
+        private const val MIN_AREA_RATIO = 0.05
+        private const val MIN_RATIO = 0.45f
         private const val MAX_RATIO = 0.98f
 
         @Volatile private var loaded = false

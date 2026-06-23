@@ -57,10 +57,13 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.serortech.cardia.net.DebugClient
+import com.serortech.cardia.settings.SettingsStore
 import com.serortech.cardia.vision.CardDetector
 import com.serortech.cardia.vision.CardOutlineDetector
 import com.serortech.cardia.vision.CardQuad
 import com.serortech.cardia.vision.OutlineResult
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
@@ -75,6 +78,8 @@ fun CameraScreen(onSettings: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val detector = remember { CardDetector(ctx) }
     val outlineDetector = remember { CardOutlineDetector() }
+    val store = remember { SettingsStore(ctx) }
+    val lastDebugPost = remember { AtomicLong(0L) }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
 
@@ -161,8 +166,13 @@ fun CameraScreen(onSettings: () -> Unit) {
                                 .also { ia ->
                                     ia.setAnalyzer(analysisExecutor) { image ->
                                         try {
-                                            diag = outlineDetector.detect(image)
+                                            val now = System.currentTimeMillis()
+                                            val post = now - lastDebugPost.get() >= 1000L
+                                            if (post) lastDebugPost.set(now)
+                                            val r = outlineDetector.detect(image, encodeDebug = post)
+                                            diag = r
                                             frames++
+                                            if (post) DebugClient.post(store.serverUrl, store.licenseKey, frames, r)
                                         } finally {
                                             image.close()
                                         }
