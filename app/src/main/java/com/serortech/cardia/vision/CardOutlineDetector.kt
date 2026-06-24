@@ -3,6 +3,7 @@ package com.serortech.cardia.vision
 import android.graphics.PointF
 import androidx.camera.core.ImageProxy
 import org.opencv.android.OpenCVLoader
+import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfByte
@@ -18,30 +19,31 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Parallélogramme détecté, exprimé dans l'image « droite » (orientation d'affichage). */
 data class CardQuad(
-    val corners: List<PointF>,    // 4 coins (ordre du contour)
-    val midpoints: List<PointF>,  // milieux des côtés : m01, m12, m23, m30
-    val segA: Float,              // longueur médiane m01–m23
-    val segB: Float,              // longueur médiane m12–m30
-    val ratio: Float,             // min/max des deux médianes
+    val corners: List<PointF>,
+    val midpoints: List<PointF>,
+    val segA: Float,
+    val segB: Float,
+    val ratio: Float,
     val srcWidth: Int,
     val srcHeight: Int,
 )
 
-/** Résultat enrichi (diagnostics HUD + frame de debug optionnelle). */
+/** Résultat enrichi (diagnostics HUD + couleur du cadre + frame de debug). */
 data class OutlineResult(
-    val quads: List<CardQuad>, // emboîtés possibles (bord carte + cadre interne)
+    val quads: List<CardQuad>,
     val ocvLoaded: Boolean,
     val contourCount: Int,
     val bestAreaPct: Int,
     val bestRatio: Float,
+    val frameColor: Int?,    // couleur moyenne de l'anneau (cadre de la carte), ARGB ; null si aucun quad
     val error: String?,
     val debugJpeg: ByteArray? = null,
 )
 
-/** Candidat interne (coords réduites + quad « droit » + aire + centre). */
 private class Cand(
     val area: Double,
     val reduced: List<Point>,
@@ -52,48 +54,48 @@ private class Cand(
 
 /**
  * Détecte une ou plusieurs cartes EN LOCAL (OpenCV), sans réseau ni IA.
- * Parallélogrammes (4 coins via enveloppe convexe) tels que :
- *  - ratio largeur/hauteur (médianes des côtés opposés, robuste à la perspective)
- *    proche de 63/88 ≈ 0,716 (±0,05) ;
- *  - orientation PORTRAIT (plus longue médiane ~verticale).
- * Retourne plusieurs quads si emboîtés (bord de la carte + cadre interne), en
- * fusionnant les quasi-doublons (double-bord d'une même ligne).
+ * Parallélogrammes portrait au ratio ~63/88 (médianes), emboîtés conservés
+ * (bord carte + cadre interne). Échantillonne la couleur de l'anneau entre les
+ * deux plus grands quads (= le cadre coloré de la carte).
+ * L'analyse fournit du RGBA (cf. ImageAnalysis OUTPUT_IMAGE_FORMAT_RGBA_8888).
  */
 class CardOutlineDetector {
 
     fun detect(image: ImageProxy, encodeDebug: Boolean = false): OutlineResult {
-        if (!ensureLoaded()) return OutlineResult(emptyList(), false, 0, 0, 0f, "OpenCV non chargé")
+        if (!ensureLoaded()) return OutlineResult(emptyList(), false, 0, 0, 0f, null, "OpenCV non chargé")
 
         val w = image.width
         val h = image.height
         val rotation = image.imageInfo.rotationDegrees
 
-        val full = Mat()
+        val rgbaFull = Mat()
+        val gray = Mat()
         val small = Mat()
+        val bgrSmall = Mat()
         val blur = Mat()
         val edges = Mat()
         val hierarchy = Mat()
         val contours = ArrayList<MatOfPoint>()
         try {
-            val yPlane = image.planes[0]
-            val rowStride = yPlane.rowStride
-            val buf = yPlane.buffer
-            val avail = buf.remaining()
-            val rows = min(h, avail / rowStride)
-            val needed = rows * rowStride
-            val data = ByteArray(needed)
-            buf.get(data, 0, needed)
-            val padded = Mat(rows, rowStride, CvType.CV_8UC1)
-            padded.put(0, 0, data)
-            padded.submat(0, rows, 0, w).copyTo(full)
-            padded.release()
+            // Plan RGBA -> Mat couleur (robuste au rowStride), puis gris.
+            val plane = image.planes[0]
+            val rowStride = plane.rowStride
+            val buf = plane.buffer
+            val bytes = ByteArray(buf.remaining())
+            buf.get(bytes)
+            val rowPixels = rowStride / 4
+            val rgbaPadded = Mat(h, rowPixels, CvType.CV_8UC4)
+            rgbaPadded.put(0, 0, bytes)
+            rgbaPadded.submat(0, h, 0, w).copyTo(rgbaFull)
+            rgbaPadded.release()
+            Imgproc.cvtColor(rgbaFull, gray, Imgproc.COLOR_RGBA2GRAY)
 
             val targetW = 480
             val scale = if (w > targetW) targetW.toFloat() / w else 1f
             if (scale < 1f) {
-                Imgproc.resize(full, small, Size(), scale.toDouble(), scale.toDouble(), Imgproc.INTER_AREA)
+                Imgproc.resize(gray, small, Size(), scale.toDouble(), scale.toDouble(), Imgproc.INTER_AREA)
             } else {
-                full.copyTo(small)
+                gray.copyTo(small)
             }
 
             Imgproc.GaussianBlur(small, blur, Size(5.0, 5.0), 0.0)
@@ -162,7 +164,6 @@ class CardOutlineDetector {
                 approx.release()
             }
 
-            // Garde les emboîtés distincts, fusionne les quasi-doublons (double-bord).
             cands.sortByDescending { it.area }
             val frameDiag = hypot(small.width().toDouble(), small.height().toDouble())
             val kept = ArrayList<Cand>()
@@ -176,19 +177,54 @@ class CardOutlineDetector {
                 if (kept.size >= MAX_QUADS) break
             }
 
+            // Couleur de l'anneau (cadre) : entre les 2 plus grands quads (sinon bande interne).
+            var frameColor: Int? = null
+            if (kept.isNotEmpty()) {
+                Imgproc.resize(rgbaFull, bgrSmall, small.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+                Imgproc.cvtColor(bgrSmall, bgrSmall, Imgproc.COLOR_RGBA2RGB)
+                frameColor = sampleRingColor(bgrSmall, kept)
+            }
+
             val bestAreaPct = if (imgArea > 0) (diagArea / imgArea * 100).toInt() else 0
-            val debugJpeg = if (encodeDebug) encodeDebugFrame(small, kept.map { it.reduced }) else null
-            return OutlineResult(kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, null, debugJpeg)
+            val debugJpeg = if (encodeDebug) encodeDebugFrame(small, kept.map { it.reduced }, frameColor) else null
+            return OutlineResult(kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, frameColor, null, debugJpeg)
         } catch (t: Throwable) {
-            return OutlineResult(emptyList(), true, 0, 0, 0f, t.javaClass.simpleName + ": " + (t.message ?: ""))
+            return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
         } finally {
-            full.release(); small.release(); blur.release(); edges.release(); hierarchy.release()
+            rgbaFull.release(); gray.release(); small.release(); bgrSmall.release()
+            blur.release(); edges.release(); hierarchy.release()
             contours.forEach { it.release() }
         }
     }
 
-    /** Dessine sur une copie couleur de la frame réduite : chaque quad vert + milieux rouges + valeurs. */
-    private fun encodeDebugFrame(small: Mat, quads: List<List<Point>>): ByteArray {
+    /** Couleur moyenne (RGB) de l'anneau entre le plus grand quad et le suivant (ou bande interne). */
+    private fun sampleRingColor(rgb: Mat, kept: List<Cand>): Int? {
+        val mask = Mat.zeros(rgb.size(), CvType.CV_8UC1)
+        try {
+            val outer = MatOfPoint(*kept[0].reduced.toTypedArray())
+            Imgproc.fillConvexPoly(mask, outer, Scalar(255.0))
+            val inner = if (kept.size >= 2) {
+                MatOfPoint(*kept[1].reduced.toTypedArray())
+            } else {
+                // Pas de cadre interne détecté : on creuse une bande à 85% vers le centre.
+                MatOfPoint(*shrink(kept[0].reduced, kept[0].cx, kept[0].cy, 0.85f).toTypedArray())
+            }
+            Imgproc.fillConvexPoly(mask, inner, Scalar(0.0))
+            inner.release(); outer.release()
+            val m = Core.mean(rgb, mask) // RGB
+            val r = m.`val`[0].roundToInt().coerceIn(0, 255)
+            val g = m.`val`[1].roundToInt().coerceIn(0, 255)
+            val b = m.`val`[2].roundToInt().coerceIn(0, 255)
+            return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        } finally {
+            mask.release()
+        }
+    }
+
+    private fun shrink(pts: List<Point>, cx: Float, cy: Float, f: Float): List<Point> =
+        pts.map { Point(cx + (it.x - cx) * f, cy + (it.y - cy) * f) }
+
+    private fun encodeDebugFrame(small: Mat, quads: List<List<Point>>, frameColor: Int?): ByteArray {
         val color = Mat()
         Imgproc.cvtColor(small, color, Imgproc.COLOR_GRAY2BGR)
         quads.forEachIndexed { idx, corners ->
@@ -201,6 +237,16 @@ class CardOutlineDetector {
             Imgproc.putText(
                 color, "A=${segA.toInt()} B=${segB.toInt()} r=${"%.2f".format(r)}",
                 Point(8.0, 20.0 + idx * 18.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
+            )
+        }
+        if (frameColor != null) {
+            val r = (frameColor shr 16) and 0xFF
+            val g = (frameColor shr 8) and 0xFF
+            val b = frameColor and 0xFF
+            Imgproc.rectangle(color, Point(8.0, 28.0), Point(40.0, 60.0), Scalar(b.toDouble(), g.toDouble(), r.toDouble()), -1)
+            Imgproc.putText(
+                color, "#%02X%02X%02X".format(r, g, b),
+                Point(46.0, 52.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
             )
         }
         val out = MatOfByte()
@@ -226,10 +272,10 @@ class CardOutlineDetector {
 
     companion object {
         private const val MIN_AREA_RATIO = 0.05
-        private const val CARD_RATIO = 63f / 88f // ≈ 0,716
+        private const val CARD_RATIO = 63f / 88f
         private const val TOLERANCE = 0.05f
-        private const val DUP_CENTER_FRAC = 0.06 // centres proches => même forme
-        private const val DUP_AREA_FRAC = 0.90   // aires proches => double-bord à fusionner
+        private const val DUP_CENTER_FRAC = 0.06
+        private const val DUP_AREA_FRAC = 0.90
         private const val MAX_QUADS = 4
         private val GREEN = Scalar(0.0, 230.0, 118.0)
         private val RED = Scalar(0.0, 0.0, 255.0)

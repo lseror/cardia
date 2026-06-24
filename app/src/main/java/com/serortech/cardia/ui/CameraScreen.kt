@@ -59,6 +59,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.serortech.cardia.net.CaptureClient
 import com.serortech.cardia.net.DebugClient
 import com.serortech.cardia.settings.SettingsStore
 import com.serortech.cardia.vision.CardDetector
@@ -117,7 +118,15 @@ fun CameraScreen(onSettings: () -> Unit) {
                     image.close()
                     scope.launch {
                         try {
-                            result = detector.detect(downscaleJpeg(jpeg, 768))
+                            val small = downscaleJpeg(jpeg, 768)
+                            // 1) Sauvegarde S3 AVANT identification.
+                            try {
+                                CaptureClient.upload(store.serverUrl, store.licenseKey, small)
+                            } catch (e: Exception) {
+                                snackbar.showSnackbar("Sauvegarde S3 : ${e.message}")
+                            }
+                            // 2) Identification (reste affichée jusqu'à la prochaine).
+                            result = detector.detect(small)
                         } catch (e: Exception) {
                             result = null
                             snackbar.showSnackbar(e.message ?: "Échec de la détection")
@@ -164,6 +173,7 @@ fun CameraScreen(onSettings: () -> Unit) {
                             val analysis = ImageAnalysis.Builder()
                                 .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                                 .build()
                                 .also { ia ->
                                     ia.setAnalyzer(analysisExecutor) { image ->
@@ -201,6 +211,10 @@ fun CameraScreen(onSettings: () -> Unit) {
                     frames = frames,
                     modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                 )
+
+                diag?.frameColor?.let { c ->
+                    FrameColorChip(c, modifier = Modifier.align(Alignment.TopEnd).padding(top = 56.dp, end = 8.dp))
+                }
 
                 IconButton(
                     onClick = onSettings,
@@ -260,6 +274,22 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
                 canvas.nativeCanvas.drawText(txt, cx, cy, paint)
             }
         }
+    }
+}
+
+/** Pastille couleur du cadre de la carte : carré de la couleur + code hexa. */
+@Composable
+private fun FrameColorChip(color: Int, modifier: Modifier) {
+    val r = (color shr 16) and 0xFF
+    val g = (color shr 8) and 0xFF
+    val b = color and 0xFF
+    Row(
+        modifier = modifier.background(Color(0xAA000000)).padding(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(modifier = Modifier.size(28.dp).background(Color(r, g, b)))
+        Text("#%02X%02X%02X".format(r, g, b), color = Color.White, style = MaterialTheme.typography.labelMedium)
     }
 }
 

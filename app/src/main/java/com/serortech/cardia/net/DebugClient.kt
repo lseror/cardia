@@ -38,6 +38,9 @@ object DebugClient {
             put("bestRatio", r.bestRatio.toDouble())
             put("error", r.error)
             put("quadCount", r.quads.size)
+            r.frameColor?.let {
+                put("frameColor", "#%02X%02X%02X".format((it shr 16) and 0xFF, (it shr 8) and 0xFF, it and 0xFF))
+            }
             r.quads.firstOrNull()?.let {
                 put("srcW", it.srcWidth)
                 put("srcH", it.srcHeight)
