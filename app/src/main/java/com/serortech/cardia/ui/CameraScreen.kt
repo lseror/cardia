@@ -52,6 +52,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -217,21 +219,46 @@ fun CameraScreen(onSettings: () -> Unit) {
     }
 }
 
-/** Trace le quadrilatère détecté, mappé sur la vue (PreviewView en FIT_CENTER). */
+/** Trace le parallélogramme vert + milieux rouges + médianes + valeurs (segments, ratio). */
 @Composable
 private fun CardOutlineOverlay(quad: CardQuad?, modifier: Modifier) {
-    if (quad == null || quad.corners.size != 4) return
+    if (quad == null || quad.corners.size != 4 || quad.midpoints.size != 4) return
     Canvas(modifier = modifier) {
         val s = min(size.width / quad.srcWidth, size.height / quad.srcHeight)
         val dx = (size.width - quad.srcWidth * s) / 2f
         val dy = (size.height - quad.srcHeight * s) / 2f
-        val pts = quad.corners.map { Offset(it.x * s + dx, it.y * s + dy) }
+        fun map(p: android.graphics.PointF) = Offset(p.x * s + dx, p.y * s + dy)
+        val pts = quad.corners.map { map(it) }
+        val mids = quad.midpoints.map { map(it) }
+
+        // Parallélogramme vert.
         val path = Path().apply {
             moveTo(pts[0].x, pts[0].y)
             for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
             close()
         }
         drawPath(path, color = Color(0xFF00E676), style = Stroke(width = 6f))
+
+        // Médianes (milieux des côtés opposés) en jaune.
+        drawLine(Color(0xCCFFEB3B), mids[0], mids[2], strokeWidth = 3f)
+        drawLine(Color(0xCCFFEB3B), mids[1], mids[3], strokeWidth = 3f)
+        // Milieux en points rouges.
+        mids.forEach { drawCircle(Color(0xFFFF1744), radius = 10f, center = it) }
+
+        // Valeurs : longueur de chaque médiane + ratio, au centre.
+        val cx = pts.map { it.x }.average().toFloat()
+        val cy = pts.map { it.y }.average().toFloat()
+        val txt = "A=${quad.segA.toInt()}  B=${quad.segB.toInt()}  r=${"%.2f".format(quad.ratio)}"
+        drawIntoCanvas { canvas ->
+            val paint = android.graphics.Paint().apply {
+                color = android.graphics.Color.WHITE
+                textSize = 38f
+                isAntiAlias = true
+                textAlign = android.graphics.Paint.Align.CENTER
+                setShadowLayer(6f, 0f, 0f, android.graphics.Color.BLACK)
+            }
+            canvas.nativeCanvas.drawText(txt, cx, cy, paint)
+        }
     }
 }
 
