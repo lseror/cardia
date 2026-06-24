@@ -37,7 +37,8 @@ object DebugClient {
             put("bestAreaPct", r.bestAreaPct)
             put("bestRatio", r.bestRatio.toDouble())
             put("error", r.error)
-            r.quad?.let {
+            put("quadCount", r.quads.size)
+            r.quads.firstOrNull()?.let {
                 put("srcW", it.srcWidth)
                 put("srcH", it.srcHeight)
             }

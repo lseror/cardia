@@ -32,27 +32,37 @@ data class CardQuad(
 
 /** Résultat enrichi (diagnostics HUD + frame de debug optionnelle). */
 data class OutlineResult(
-    val quad: CardQuad?,
+    val quads: List<CardQuad>, // emboîtés possibles (bord carte + cadre interne)
     val ocvLoaded: Boolean,
     val contourCount: Int,
-    val bestAreaPct: Int,   // aire du plus gros contour (toute forme), en %
-    val bestRatio: Float,   // ratio du plus gros quadrilatère candidat
+    val bestAreaPct: Int,
+    val bestRatio: Float,
     val error: String?,
     val debugJpeg: ByteArray? = null,
 )
 
+/** Candidat interne (coords réduites + quad « droit » + aire + centre). */
+private class Cand(
+    val area: Double,
+    val reduced: List<Point>,
+    val up: CardQuad,
+    val cx: Float,
+    val cy: Float,
+)
+
 /**
- * Détecte une carte EN LOCAL (OpenCV), sans réseau ni IA.
- * Parallélogramme (4 coins via enveloppe convexe) dont :
- *  - le ratio largeur/hauteur, mesuré par les médianes (milieux des côtés
- *    opposés, robuste à la perspective), est proche de 63/88 ≈ 0,716 (±0,05) ;
- *  - l'orientation est PORTRAIT : la plus longue médiane (la hauteur) est plus
- *    verticale qu'horizontale dans l'image affichée (téléphone tenu droit).
+ * Détecte une ou plusieurs cartes EN LOCAL (OpenCV), sans réseau ni IA.
+ * Parallélogrammes (4 coins via enveloppe convexe) tels que :
+ *  - ratio largeur/hauteur (médianes des côtés opposés, robuste à la perspective)
+ *    proche de 63/88 ≈ 0,716 (±0,05) ;
+ *  - orientation PORTRAIT (plus longue médiane ~verticale).
+ * Retourne plusieurs quads si emboîtés (bord de la carte + cadre interne), en
+ * fusionnant les quasi-doublons (double-bord d'une même ligne).
  */
 class CardOutlineDetector {
 
     fun detect(image: ImageProxy, encodeDebug: Boolean = false): OutlineResult {
-        if (!ensureLoaded()) return OutlineResult(null, false, 0, 0, 0f, "OpenCV non chargé")
+        if (!ensureLoaded()) return OutlineResult(emptyList(), false, 0, 0, 0f, "OpenCV non chargé")
 
         val w = image.width
         val h = image.height
@@ -65,7 +75,6 @@ class CardOutlineDetector {
         val hierarchy = Mat()
         val contours = ArrayList<MatOfPoint>()
         try {
-            // Plan Y -> Mat gris, robuste au rowStride/padding.
             val yPlane = image.planes[0]
             val rowStride = yPlane.rowStride
             val buf = yPlane.buffer
@@ -102,19 +111,16 @@ class CardOutlineDetector {
             val inv = 1f / scale
             val (uw, uh) = if (rotation == 90 || rotation == 270) h to w else w to h
 
-            var diagArea = 0.0       // plus gros contour toute forme (areaPct)
-            var diagQuadArea = 0.0   // plus gros 4-gone (pour bestRatio diag)
+            var diagArea = 0.0
+            var diagQuadArea = 0.0
             var diagQuadRatio = 0f
-            var bestQuadArea = 0.0
-            var bestQuad: CardQuad? = null
-            var bestReduced: List<Point>? = null
+            val cands = ArrayList<Cand>()
 
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
                 if (area > diagArea) diagArea = area
                 if (area < MIN_AREA_RATIO * imgArea) continue
 
-                // Enveloppe convexe -> approx 4 coins (parallélogramme).
                 val hullIdx = MatOfInt()
                 Imgproc.convexHull(contour, hullIdx)
                 val cpts = contour.toArray()
@@ -133,7 +139,6 @@ class CardOutlineDetector {
                     val convex = Imgproc.isContourConvex(poly)
                     poly.release()
                     if (convex) {
-                        // Coins -> image droite (la notion « portrait » est définie là).
                         val up = q.map { rotatePoint((it.x * inv).toFloat(), (it.y * inv).toFloat(), rotation, w, h) }
                         val mids = sideMidpoints(up)
                         val segA = dist(mids[0], mids[2])
@@ -141,18 +146,15 @@ class CardOutlineDetector {
                         if (segA > 0f && segB > 0f) {
                             val ratio = min(segA, segB) / max(segA, segB)
                             if (area > diagQuadArea) { diagQuadArea = area; diagQuadRatio = ratio }
-
-                            // Portrait : la plus longue médiane (= hauteur) doit être ~verticale.
                             val portrait = if (segA >= segB) {
                                 abs(mids[2].y - mids[0].y) > abs(mids[2].x - mids[0].x)
                             } else {
                                 abs(mids[3].y - mids[1].y) > abs(mids[3].x - mids[1].x)
                             }
-
-                            if (portrait && abs(ratio - CARD_RATIO) <= TOLERANCE && area > bestQuadArea) {
-                                bestQuadArea = area
-                                bestQuad = CardQuad(up, mids, segA, segB, ratio, uw, uh)
-                                bestReduced = q
+                            if (portrait && abs(ratio - CARD_RATIO) <= TOLERANCE) {
+                                val cx = q.sumOf { it.x }.toFloat() / 4f
+                                val cy = q.sumOf { it.y }.toFloat() / 4f
+                                cands.add(Cand(area, q, CardQuad(up, mids, segA, segB, ratio, uw, uh), cx, cy))
                             }
                         }
                     }
@@ -160,22 +162,36 @@ class CardOutlineDetector {
                 approx.release()
             }
 
+            // Garde les emboîtés distincts, fusionne les quasi-doublons (double-bord).
+            cands.sortByDescending { it.area }
+            val frameDiag = hypot(small.width().toDouble(), small.height().toDouble())
+            val kept = ArrayList<Cand>()
+            for (c in cands) {
+                val dup = kept.any { k ->
+                    val d = hypot((c.cx - k.cx).toDouble(), (c.cy - k.cy).toDouble())
+                    d < DUP_CENTER_FRAC * frameDiag &&
+                        min(c.area, k.area) / max(c.area, k.area) > DUP_AREA_FRAC
+                }
+                if (!dup) kept.add(c)
+                if (kept.size >= MAX_QUADS) break
+            }
+
             val bestAreaPct = if (imgArea > 0) (diagArea / imgArea * 100).toInt() else 0
-            val debugJpeg = if (encodeDebug) encodeDebugFrame(small, bestReduced) else null
-            return OutlineResult(bestQuad, true, contours.size, bestAreaPct, diagQuadRatio, null, debugJpeg)
+            val debugJpeg = if (encodeDebug) encodeDebugFrame(small, kept.map { it.reduced }) else null
+            return OutlineResult(kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, null, debugJpeg)
         } catch (t: Throwable) {
-            return OutlineResult(null, true, 0, 0, 0f, t.javaClass.simpleName + ": " + (t.message ?: ""))
+            return OutlineResult(emptyList(), true, 0, 0, 0f, t.javaClass.simpleName + ": " + (t.message ?: ""))
         } finally {
             full.release(); small.release(); blur.release(); edges.release(); hierarchy.release()
             contours.forEach { it.release() }
         }
     }
 
-    /** Dessine, sur une copie couleur de la frame réduite, le quad vert + milieux rouges + valeurs. */
-    private fun encodeDebugFrame(small: Mat, corners: List<Point>?): ByteArray {
+    /** Dessine sur une copie couleur de la frame réduite : chaque quad vert + milieux rouges + valeurs. */
+    private fun encodeDebugFrame(small: Mat, quads: List<List<Point>>): ByteArray {
         val color = Mat()
         Imgproc.cvtColor(small, color, Imgproc.COLOR_GRAY2BGR)
-        if (corners != null) {
+        quads.forEachIndexed { idx, corners ->
             Imgproc.polylines(color, listOf(MatOfPoint(*corners.toTypedArray())), true, GREEN, 2)
             val mids = sideMidpoints(corners.map { PointF(it.x.toFloat(), it.y.toFloat()) })
             mids.forEach { Imgproc.circle(color, Point(it.x.toDouble(), it.y.toDouble()), 4, RED, -1) }
@@ -184,7 +200,7 @@ class CardOutlineDetector {
             val r = min(segA, segB) / max(segA, segB)
             Imgproc.putText(
                 color, "A=${segA.toInt()} B=${segB.toInt()} r=${"%.2f".format(r)}",
-                Point(8.0, 20.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
+                Point(8.0, 20.0 + idx * 18.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
             )
         }
         val out = MatOfByte()
@@ -212,6 +228,9 @@ class CardOutlineDetector {
         private const val MIN_AREA_RATIO = 0.05
         private const val CARD_RATIO = 63f / 88f // ≈ 0,716
         private const val TOLERANCE = 0.05f
+        private const val DUP_CENTER_FRAC = 0.06 // centres proches => même forme
+        private const val DUP_AREA_FRAC = 0.90   // aires proches => double-bord à fusionner
+        private const val MAX_QUADS = 4
         private val GREEN = Scalar(0.0, 230.0, 118.0)
         private val RED = Scalar(0.0, 0.0, 255.0)
 
