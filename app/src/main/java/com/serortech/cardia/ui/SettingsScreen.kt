@@ -41,6 +41,12 @@ fun SettingsScreen(onBack: () -> Unit) {
     val store = remember { SettingsStore(ctx) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val versionLabel = remember {
+        runCatching {
+            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            "Version ${pi.versionName} (${pi.longVersionCode})"
+        }.getOrDefault("Version ?")
+    }
 
     var serverUrl by remember { mutableStateOf(store.serverUrl) }
     var inviteCode by remember { mutableStateOf("") }
@@ -136,6 +142,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(if (working) "Activation…" else "Activer") }
             }
+
+            Text(
+                versionLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
