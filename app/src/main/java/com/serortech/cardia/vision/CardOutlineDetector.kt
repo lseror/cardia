@@ -61,6 +61,9 @@ private class Cand(
  */
 class CardOutlineDetector {
 
+    /** Tolérance sur le ratio (±), réglable à chaud depuis l'UI. Lue à chaque frame. */
+    @Volatile var tolerance: Float = DEFAULT_TOLERANCE
+
     fun detect(image: ImageProxy, encodeDebug: Boolean = false): OutlineResult {
         if (!ensureLoaded()) return OutlineResult(emptyList(), false, 0, 0, 0f, null, "OpenCV non chargé")
 
@@ -153,7 +156,7 @@ class CardOutlineDetector {
                             } else {
                                 abs(mids[3].y - mids[1].y) > abs(mids[3].x - mids[1].x)
                             }
-                            if (portrait && abs(ratio - CARD_RATIO) <= TOLERANCE) {
+                            if (portrait && abs(ratio - CARD_RATIO) <= tolerance) {
                                 val cx = q.sumOf { it.x }.toFloat() / 4f
                                 val cy = q.sumOf { it.y }.toFloat() / 4f
                                 cands.add(Cand(area, q, CardQuad(up, mids, segA, segB, ratio, uw, uh), cx, cy))
@@ -273,7 +276,7 @@ class CardOutlineDetector {
     companion object {
         private const val MIN_AREA_RATIO = 0.05
         private const val CARD_RATIO = 63f / 88f
-        private const val TOLERANCE = 0.05f
+        const val DEFAULT_TOLERANCE = 0.05f
         private const val DUP_CENTER_FRAC = 0.06
         private const val DUP_AREA_FRAC = 0.90
         private const val MAX_QUADS = 4

@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -105,6 +106,8 @@ fun CameraScreen(onSettings: () -> Unit) {
     var result by remember { mutableStateOf<Boolean?>(null) }
     var diag by remember { mutableStateOf<OutlineResult?>(null) }
     var frames by remember { mutableStateOf(0) }
+    var tolerance by remember { mutableStateOf(store.ratioTolerance) }
+    LaunchedEffect(Unit) { outlineDetector.tolerance = tolerance }
 
     fun analyze() {
         if (analyzing) return
@@ -223,6 +226,16 @@ fun CameraScreen(onSettings: () -> Unit) {
                     Icon(Icons.Default.Settings, contentDescription = "Réglages", tint = Color.White)
                 }
 
+                ToleranceSlider(
+                    value = tolerance,
+                    onChange = { v -> tolerance = v; outlineDetector.tolerance = v },
+                    onCommit = { store.ratioTolerance = tolerance },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, bottom = 96.dp),
+                )
+
                 IndicatorBanner(
                     analyzing = analyzing,
                     result = result,
@@ -274,6 +287,30 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
                 canvas.nativeCanvas.drawText(txt, cx, cy, paint)
             }
         }
+    }
+}
+
+/** Réglage live de la tolérance sur le ratio (±), avec valeur courante affichée. */
+@Composable
+private fun ToleranceSlider(
+    value: Float,
+    onChange: (Float) -> Unit,
+    onCommit: () -> Unit,
+    modifier: Modifier,
+) {
+    Column(modifier = modifier.background(Color(0xAA000000)).padding(horizontal = 12.dp, vertical = 6.dp)) {
+        Text(
+            "Tolérance ratio  ±${"%.2f".format(value)}",
+            color = Color.White,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            onValueChangeFinished = onCommit,
+            valueRange = 0.01f..0.30f,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

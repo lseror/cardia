@@ -43,6 +43,11 @@ class SettingsStore(ctx: Context) {
         get() = prefs.getInt(KEY_DAILY_LIMIT, 0)
         set(value) = prefs.edit { putInt(KEY_DAILY_LIMIT, value) }
 
+    /** Tolérance sur le ratio largeur/hauteur pour la détection du contour de carte. */
+    var ratioTolerance: Float
+        get() = prefs.getFloat(KEY_RATIO_TOL, DEFAULT_RATIO_TOLERANCE)
+        set(value) = prefs.edit { putFloat(KEY_RATIO_TOL, value) }
+
     /** Efface la licence (pour réactiver avec un nouveau code). */
     fun clearLicense() = prefs.edit {
         remove(KEY_LICENSE)
@@ -50,8 +55,12 @@ class SettingsStore(ctx: Context) {
     }
 
     companion object {
+        /** Tolérance par défaut sur le ratio (±) — voir CardOutlineDetector. */
+        const val DEFAULT_RATIO_TOLERANCE = 0.05f
+
         private const val KEY_LICENSE = "license_key"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_DAILY_LIMIT = "daily_limit"
+        private const val KEY_RATIO_TOL = "ratio_tolerance"
     }
 }
