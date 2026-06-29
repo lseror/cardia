@@ -30,6 +30,8 @@ data class CardQuad(
     val ratio: Float,
     val srcWidth: Int,
     val srcHeight: Int,
+    /** Coins réellement arrondis (bord de carte) vs vifs (cadre interne) → pilote le rendu. */
+    val rounded: Boolean = false,
 )
 
 /** Résultat enrichi (diagnostics HUD + couleur du cadre + frame de debug). */
@@ -126,45 +128,48 @@ class CardOutlineDetector {
                 if (area > diagArea) diagArea = area
                 if (area < MIN_AREA_RATIO * imgArea) continue
 
-                val hullIdx = MatOfInt()
-                Imgproc.convexHull(contour, hullIdx)
+                // Rectangle tourné d'aire minimale : fournit 4 coins même quand les
+                // coins de la carte sont arrondis (ce qu'approxPolyDP ne réduisait pas
+                // à 4 sommets, d'où le bord externe ignoré jusqu'ici).
                 val cpts = contour.toArray()
-                val hullPts = hullIdx.toArray().map { cpts[it] }
-                hullIdx.release()
-                if (hullPts.size < 4) continue
-                val hull2f = MatOfPoint2f(*hullPts.toTypedArray())
-                val peri = Imgproc.arcLength(hull2f, true)
-                val approx = MatOfPoint2f()
-                Imgproc.approxPolyDP(hull2f, approx, 0.02 * peri, true)
-                hull2f.release()
+                val c2f = MatOfPoint2f(*cpts)
+                val rr = Imgproc.minAreaRect(c2f)
+                c2f.release()
+                val rectArea = rr.size.width * rr.size.height
+                if (rectArea <= 0.0) continue
+                // Taux de remplissage : rejette les blobs non rectangulaires. Les coins
+                // arrondis ne coûtent que ~0,1% d'aire, un vrai cadre reste donc >> seuil.
+                if (area / rectArea < FILL_MIN) continue
 
-                if (approx.total() == 4L) {
-                    val q = approx.toArray().toList()
-                    val poly = MatOfPoint(*q.toTypedArray())
-                    val convex = Imgproc.isContourConvex(poly)
-                    poly.release()
-                    if (convex) {
-                        val up = q.map { rotatePoint((it.x * inv).toFloat(), (it.y * inv).toFloat(), rotation, w, h) }
-                        val mids = sideMidpoints(up)
-                        val segA = dist(mids[0], mids[2])
-                        val segB = dist(mids[1], mids[3])
-                        if (segA > 0f && segB > 0f) {
-                            val ratio = min(segA, segB) / max(segA, segB)
-                            if (area > diagQuadArea) { diagQuadArea = area; diagQuadRatio = ratio }
-                            val portrait = if (segA >= segB) {
-                                abs(mids[2].y - mids[0].y) > abs(mids[2].x - mids[0].x)
-                            } else {
-                                abs(mids[3].y - mids[1].y) > abs(mids[3].x - mids[1].x)
-                            }
-                            if (portrait && abs(ratio - CARD_RATIO) <= tolerance) {
-                                val cx = q.sumOf { it.x }.toFloat() / 4f
-                                val cy = q.sumOf { it.y }.toFloat() / 4f
-                                cands.add(Cand(area, q, CardQuad(up, mids, segA, segB, ratio, uw, uh), cx, cy))
-                            }
-                        }
-                    }
+                val box = arrayOfNulls<Point>(4)
+                rr.points(box)
+                val q = box.filterNotNull()
+                if (q.size != 4) continue
+
+                val up = q.map { rotatePoint((it.x * inv).toFloat(), (it.y * inv).toFloat(), rotation, w, h) }
+                val mids = sideMidpoints(up)
+                val segA = dist(mids[0], mids[2])
+                val segB = dist(mids[1], mids[3])
+                if (segA <= 0f || segB <= 0f) continue
+                val ratio = min(segA, segB) / max(segA, segB)
+                if (area > diagQuadArea) { diagQuadArea = area; diagQuadRatio = ratio }
+                val portrait = if (segA >= segB) {
+                    abs(mids[2].y - mids[0].y) > abs(mids[2].x - mids[0].x)
+                } else {
+                    abs(mids[3].y - mids[1].y) > abs(mids[3].x - mids[1].x)
                 }
-                approx.release()
+                if (!portrait || abs(ratio - CARD_RATIO) > tolerance) continue
+
+                // Coins réellement arrondis (bord carte) vs vifs (cadre interne) :
+                // écart moyen entre chaque coin du rect et le contour réel. Coin vif → ~0 ;
+                // coin coupé par l'arrondi → > seuil. Non bloquant : sert au rendu.
+                val rPx = CARD_CORNER_RADIUS_FRAC.toDouble() * min(rr.size.width, rr.size.height)
+                val cptsList = cpts.toList()
+                val rounded = q.map { minDist(it, cptsList) }.average() > ROUND_GAP_FRAC * rPx
+
+                val cx = q.sumOf { it.x }.toFloat() / 4f
+                val cy = q.sumOf { it.y }.toFloat() / 4f
+                cands.add(Cand(area, q, CardQuad(up, mids, segA, segB, ratio, uw, uh, rounded), cx, cy))
             }
 
             cands.sortByDescending { it.area }
@@ -266,6 +271,16 @@ class CardOutlineDetector {
     private fun midF(a: PointF, b: PointF) = PointF((a.x + b.x) / 2f, (a.y + b.y) / 2f)
     private fun dist(a: PointF, b: PointF) = hypot((a.x - b.x).toDouble(), (a.y - b.y).toDouble()).toFloat()
 
+    /** Distance minimale du point [p] à l'ensemble de points [pts] (contour). */
+    private fun minDist(p: Point, pts: List<Point>): Double {
+        var best = Double.MAX_VALUE
+        for (q in pts) {
+            val d = hypot(p.x - q.x, p.y - q.y)
+            if (d < best) best = d
+        }
+        return best
+    }
+
     private fun rotatePoint(x: Float, y: Float, rotation: Int, w: Int, h: Int): PointF = when (rotation) {
         90 -> PointF(h - 1 - y, x)
         180 -> PointF(w - 1 - x, h - 1 - y)
@@ -277,6 +292,13 @@ class CardOutlineDetector {
         private const val MIN_AREA_RATIO = 0.05
         private const val CARD_RATIO = 63f / 88f
         const val DEFAULT_TOLERANCE = 0.05f
+
+        /** Rayon de courbure d'une carte 63×88 (~3 mm) rapporté au petit côté. */
+        const val CARD_CORNER_RADIUS_FRAC = 0.048f
+        /** Seuil de remplissage contour/rectMin : en dessous, le blob n'est pas rectangulaire. */
+        private const val FILL_MIN = 0.82
+        /** Un coin est jugé arrondi si l'écart moyen au contour dépasse cette fraction du rayon. */
+        private const val ROUND_GAP_FRAC = 0.25
         private const val DUP_CENTER_FRAC = 0.06
         private const val DUP_AREA_FRAC = 0.90
         private const val MAX_QUADS = 4

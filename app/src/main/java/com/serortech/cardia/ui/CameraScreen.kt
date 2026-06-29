@@ -287,10 +287,17 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
             val pts = quad.corners.map { map(it) }
             val mids = quad.midpoints.map { map(it) }
 
-            val path = Path().apply {
-                moveTo(pts[0].x, pts[0].y)
-                for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-                close()
+            val path = if (quad.rounded) {
+                // Bord de carte : coins arrondis au rayon réel (~3 mm rapporté au petit côté).
+                val r = CardOutlineDetector.CARD_CORNER_RADIUS_FRAC * min(quad.segA, quad.segB) * s
+                roundedQuadPath(pts, r)
+            } else {
+                // Cadre interne : rectangle vif.
+                Path().apply {
+                    moveTo(pts[0].x, pts[0].y)
+                    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                    close()
+                }
             }
             drawPath(path, color = Color(0xFF00E676), style = Stroke(width = 6f))
             drawLine(Color(0xCCFFEB3B), mids[0], mids[2], strokeWidth = 3f)
@@ -312,6 +319,32 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
             }
         }
     }
+}
+
+/**
+ * Chemin fermé suivant le quadrilatère [pts] mais avec des coins arrondis de rayon
+ * [r] (px écran) : chaque coin est tronqué de [r] le long de ses deux arêtes et relié
+ * par une Bézier quadratique dont le point de contrôle est le coin d'origine. Le rayon
+ * est borné à la moitié de l'arête la plus courte pour éviter le chevauchement.
+ */
+private fun roundedQuadPath(pts: List<Offset>, r: Float): Path {
+    val n = pts.size
+    val path = Path()
+    for (i in 0 until n) {
+        val curr = pts[i]
+        val prev = pts[(i - 1 + n) % n]
+        val next = pts[(i + 1) % n]
+        val lenPrev = (prev - curr).getDistance()
+        val lenNext = (next - curr).getDistance()
+        if (lenPrev <= 0f || lenNext <= 0f) continue
+        val rr = min(r, min(lenPrev, lenNext) / 2f)
+        val entry = curr + (prev - curr) / lenPrev * rr  // fin de l'arête entrante
+        val exit = curr + (next - curr) / lenNext * rr    // début de l'arête sortante
+        if (i == 0) path.moveTo(entry.x, entry.y) else path.lineTo(entry.x, entry.y)
+        path.quadraticTo(curr.x, curr.y, exit.x, exit.y)
+    }
+    path.close()
+    return path
 }
 
 /** Réglage live de la tolérance sur le ratio (±), avec valeur courante affichée. */
