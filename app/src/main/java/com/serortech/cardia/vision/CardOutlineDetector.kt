@@ -34,6 +34,20 @@ data class CardQuad(
     val rounded: Boolean = false,
 )
 
+/**
+ * Diagnostic d'un contour candidat (au-dessus du seuil d'aire), rempli uniquement
+ * en mode snapshot pour comprendre pourquoi un cadre est accepté ou rejeté.
+ */
+data class CardCandidate(
+    val area: Double,
+    val fillRatio: Double,
+    val ratio: Float,
+    val portrait: Boolean,
+    val rounded: Boolean,
+    val accepted: Boolean,
+    val rejectReason: String,  // "ok" | "fill" | "ratio" | "portrait" | "degenerate"
+)
+
 /** Résultat enrichi (diagnostics HUD + couleur du cadre + frame de debug). */
 data class OutlineResult(
     val quads: List<CardQuad>,
@@ -44,6 +58,8 @@ data class OutlineResult(
     val frameColor: Int?,    // couleur moyenne de l'anneau (cadre de la carte), ARGB ; null si aucun quad
     val error: String?,
     val debugJpeg: ByteArray? = null,
+    /** Candidats diagnostiqués (snapshot uniquement). */
+    val candidates: List<CardCandidate> = emptyList(),
 )
 
 private class Cand(
@@ -66,7 +82,7 @@ class CardOutlineDetector {
     /** Tolérance sur le ratio (±), réglable à chaud depuis l'UI. Lue à chaque frame. */
     @Volatile var tolerance: Float = DEFAULT_TOLERANCE
 
-    fun detect(image: ImageProxy, encodeDebug: Boolean = false): OutlineResult {
+    fun detect(image: ImageProxy, encodeDebug: Boolean = false, snapshot: Boolean = false): OutlineResult {
         if (!ensureLoaded()) return OutlineResult(emptyList(), false, 0, 0, 0f, null, "OpenCV non chargé")
 
         val w = image.width
@@ -122,6 +138,7 @@ class CardOutlineDetector {
             var diagQuadArea = 0.0
             var diagQuadRatio = 0f
             val cands = ArrayList<Cand>()
+            val candDiags = if (snapshot) ArrayList<CardCandidate>() else null
 
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
@@ -136,41 +153,51 @@ class CardOutlineDetector {
                 val rr = Imgproc.minAreaRect(c2f)
                 c2f.release()
                 val rectArea = rr.size.width * rr.size.height
-                if (rectArea <= 0.0) continue
-                // Taux de remplissage : rejette les blobs non rectangulaires. Les coins
-                // arrondis ne coûtent que ~0,1% d'aire, un vrai cadre reste donc >> seuil.
-                if (area / rectArea < FILL_MIN) continue
-
                 val box = arrayOfNulls<Point>(4)
                 rr.points(box)
                 val q = box.filterNotNull()
-                if (q.size != 4) continue
+                if (rectArea <= 0.0 || q.size != 4) {
+                    candDiags?.add(CardCandidate(area, 0.0, 0f, false, false, false, "degenerate"))
+                    continue
+                }
 
+                // Taux de remplissage : rejette les blobs non rectangulaires. Les coins
+                // arrondis ne coûtent que ~0,1% d'aire, un vrai cadre reste donc >> seuil.
+                val fill = area / rectArea
                 val up = q.map { rotatePoint((it.x * inv).toFloat(), (it.y * inv).toFloat(), rotation, w, h) }
                 val mids = sideMidpoints(up)
                 val segA = dist(mids[0], mids[2])
                 val segB = dist(mids[1], mids[3])
-                if (segA <= 0f || segB <= 0f) continue
-                val ratio = min(segA, segB) / max(segA, segB)
-                if (area > diagQuadArea) { diagQuadArea = area; diagQuadRatio = ratio }
+                val ratio = if (segA > 0f && segB > 0f) min(segA, segB) / max(segA, segB) else 0f
+                if (segA > 0f && segB > 0f && area > diagQuadArea) { diagQuadArea = area; diagQuadRatio = ratio }
                 val portrait = if (segA >= segB) {
                     abs(mids[2].y - mids[0].y) > abs(mids[2].x - mids[0].x)
                 } else {
                     abs(mids[3].y - mids[1].y) > abs(mids[3].x - mids[1].x)
                 }
-                if (!portrait || abs(ratio - CARD_RATIO) > tolerance) continue
 
                 // Coins réellement arrondis (bord carte) vs vifs (cadre interne) :
                 // écart moyen entre chaque coin du rect et le contour réel. Coin vif → ~0 ;
                 // coin coupé par l'arrondi → > seuil. Non bloquant : sert au rendu.
                 val rPx = CARD_CORNER_RADIUS_FRAC.toDouble() * min(rr.size.width, rr.size.height)
-                val cptsList = cpts.toList()
-                val rounded = q.map { minDist(it, cptsList) }.average() > ROUND_GAP_FRAC * rPx
+                val rounded = q.map { minDist(it, cpts.toList()) }.average() > ROUND_GAP_FRAC * rPx
+
+                val reason = when {
+                    segA <= 0f || segB <= 0f -> "degenerate"
+                    fill < FILL_MIN -> "fill"
+                    !portrait -> "portrait"
+                    abs(ratio - CARD_RATIO) > tolerance -> "ratio"
+                    else -> "ok"
+                }
+                candDiags?.add(CardCandidate(area, fill, ratio, portrait, rounded, reason == "ok", reason))
+                if (reason != "ok") continue
 
                 val cx = q.sumOf { it.x }.toFloat() / 4f
                 val cy = q.sumOf { it.y }.toFloat() / 4f
                 cands.add(Cand(area, q, CardQuad(up, mids, segA, segB, ratio, uw, uh, rounded), cx, cy))
             }
+            // Plus gros candidats d'abord (utile pour lire le diagnostic).
+            candDiags?.sortByDescending { it.area }
 
             cands.sortByDescending { it.area }
             val frameDiag = hypot(small.width().toDouble(), small.height().toDouble())
@@ -195,7 +222,10 @@ class CardOutlineDetector {
 
             val bestAreaPct = if (imgArea > 0) (diagArea / imgArea * 100).toInt() else 0
             val debugJpeg = if (encodeDebug) encodeDebugFrame(small, kept.map { it.reduced }, frameColor) else null
-            return OutlineResult(kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, frameColor, null, debugJpeg)
+            return OutlineResult(
+                kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, frameColor, null,
+                debugJpeg, candDiags ?: emptyList(),
+            )
         } catch (t: Throwable) {
             return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
         } finally {

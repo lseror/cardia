@@ -1,9 +1,15 @@
 package com.serortech.cardia.ui
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
@@ -63,13 +69,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.serortech.cardia.net.CaptureClient
 import com.serortech.cardia.net.DebugClient
+import com.serortech.cardia.net.SnapshotClient
 import com.serortech.cardia.settings.SettingsStore
 import com.serortech.cardia.vision.CardDetector
 import com.serortech.cardia.vision.CardOutlineDetector
 import com.serortech.cardia.vision.CardQuad
 import com.serortech.cardia.vision.OutlineResult
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import kotlin.math.min
@@ -132,6 +142,13 @@ fun CameraScreen(
     var tolerance by remember { mutableStateOf(store.ratioTolerance) }
     LaunchedEffect(Unit) { outlineDetector.tolerance = tolerance }
 
+    // Snapshot télémétrie : le bouton arme un flag (lu/consommé par l'analyzer, qui
+    // produit alors un OutlineResult enrichi des candidats) ; snapshotBusy désactive
+    // le bouton le temps de la capture + envoi.
+    val activity = ctx.findActivity()
+    val snapshotPending = remember { AtomicBoolean(false) }
+    var snapshotBusy by remember { mutableStateOf(false) }
+
     fun analyze() {
         if (analyzing) return
         analyzing = true
@@ -168,6 +185,31 @@ fun CameraScreen(
                 }
             },
         )
+    }
+
+    // Capture l'écran (photo + surcouche) et pousse le snapshot complet en télémétrie.
+    fun sendSnapshot(r: OutlineResult) {
+        val act = activity ?: run { snapshotBusy = false; return }
+        Handler(Looper.getMainLooper()).post {
+            captureWindow(act) { bmp ->
+                if (bmp == null) {
+                    snapshotBusy = false
+                    scope.launch { snackbar.showSnackbar("Capture écran impossible") }
+                    return@captureWindow
+                }
+                val appVersion = runCatching {
+                    act.packageManager.getPackageInfo(act.packageName, 0).versionName
+                }.getOrNull() ?: ""
+                scope.launch {
+                    val jpeg = withContext(Dispatchers.IO) { bitmapToJpeg(bmp, 1280, 80) }
+                    val err = withContext(Dispatchers.IO) {
+                        SnapshotClient.post(store.serverUrl, store.licenseKey, r, jpeg, tolerance, 0, appVersion)
+                    }
+                    snapshotBusy = false
+                    snackbar.showSnackbar(if (err == null) "Snapshot envoyé ✓" else "Snapshot : $err")
+                }
+            }
+        }
     }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { inner ->
@@ -207,10 +249,12 @@ fun CameraScreen(
                                             val now = System.currentTimeMillis()
                                             val post = now - lastDebugPost.get() >= 1000L
                                             if (post) lastDebugPost.set(now)
-                                            val r = outlineDetector.detect(image, encodeDebug = post)
+                                            val wantSnap = snapshotPending.getAndSet(false)
+                                            val r = outlineDetector.detect(image, encodeDebug = post, snapshot = wantSnap)
                                             diag = r
                                             frames++
                                             if (post) DebugClient.post(store.serverUrl, store.licenseKey, frames, r)
+                                            if (wantSnap) sendSnapshot(r)
                                         } finally {
                                             image.close()
                                         }
@@ -249,6 +293,14 @@ fun CameraScreen(
                 ) {
                     Icon(Icons.Default.Settings, contentDescription = "Réglages", tint = Color.White)
                 }
+
+                Button(
+                    onClick = { if (!snapshotBusy) { snapshotBusy = true; snapshotPending.set(true) } },
+                    enabled = !snapshotBusy,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 150.dp),
+                ) { Text(if (snapshotBusy) "Snapshot…" else "📸 Snapshot") }
 
                 ToleranceSlider(
                     value = tolerance,
@@ -327,6 +379,49 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
  * par une Bézier quadratique dont le point de contrôle est le coin d'origine. Le rayon
  * est borné à la moitié de l'arête la plus courte pour éviter le chevauchement.
  */
+/** Remonte la chaîne de Context pour trouver l'Activity hôte. */
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * Copie d'écran de la fenêtre (photo caméra + surcouche Compose) via PixelCopy.
+ * Le callback est invoqué sur le main thread ; [onResult] reçoit null en cas d'échec.
+ */
+private fun captureWindow(activity: Activity, onResult: (Bitmap?) -> Unit) {
+    val decor = activity.window.decorView
+    val w = decor.width
+    val h = decor.height
+    if (w <= 0 || h <= 0) { onResult(null); return }
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    try {
+        PixelCopy.request(activity.window, bmp, { result ->
+            onResult(if (result == PixelCopy.SUCCESS) bmp else null)
+        }, Handler(Looper.getMainLooper()))
+    } catch (e: IllegalArgumentException) {
+        onResult(null)
+    }
+}
+
+/** Downscale (plus grand côté ≤ [maxDim]) puis JPEG qualité [quality]. */
+private fun bitmapToJpeg(src: Bitmap, maxDim: Int, quality: Int): ByteArray {
+    val longest = if (src.width >= src.height) src.width else src.height
+    val scaled = if (longest > maxDim) {
+        val s = maxDim.toFloat() / longest
+        Bitmap.createScaledBitmap(src, (src.width * s).toInt(), (src.height * s).toInt(), true)
+    } else {
+        src
+    }
+    val out = ByteArrayOutputStream()
+    scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+    return out.toByteArray()
+}
+
 private fun roundedQuadPath(pts: List<Offset>, r: Float): Path {
     val n = pts.size
     val path = Path()
