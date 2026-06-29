@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -75,7 +76,10 @@ import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraScreen(onSettings: () -> Unit) {
+fun CameraScreen(
+    onSettings: () -> Unit,
+    onProvideTorchToggle: (toggle: (() -> Unit)?) -> Unit = {},
+) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -89,6 +93,25 @@ fun CameraScreen(onSettings: () -> Unit) {
 
     val imageCapture = remember {
         ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
+    }
+
+    // Caméra liée + état du flash : Vol+ (géré par l'Activity) appelle le toggle
+    // enregistré ici, qui pilote le flash via le CameraControl de la caméra active.
+    val cameraRef = remember { mutableStateOf<Camera?>(null) }
+    var torchOn by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        onProvideTorchToggle {
+            cameraRef.value?.takeIf { it.cameraInfo.hasFlashUnit() }?.let { cam ->
+                torchOn = !torchOn
+                cam.cameraControl.enableTorch(torchOn)
+            }
+        }
+        onDispose {
+            cameraRef.value?.takeIf { it.cameraInfo.hasFlashUnit() }
+                ?.cameraControl?.enableTorch(false)
+            torchOn = false
+            onProvideTorchToggle(null)
+        }
     }
 
     var hasPermission by remember {
@@ -194,13 +217,14 @@ fun CameraScreen(onSettings: () -> Unit) {
                                     }
                                 }
                             provider.unbindAll()
-                            provider.bindToLifecycle(
+                            cameraRef.value = provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
                                 imageCapture,
                                 analysis,
                             )
+                            torchOn = false
                         }, ContextCompat.getMainExecutor(c))
                         previewView
                     },
