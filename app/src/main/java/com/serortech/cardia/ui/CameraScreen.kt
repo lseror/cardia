@@ -1,15 +1,9 @@
 package com.serortech.cardia.ui
 
 import android.Manifest
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Handler
-import android.os.Looper
-import android.view.PixelCopy
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
@@ -143,11 +137,18 @@ fun CameraScreen(
     LaunchedEffect(Unit) { outlineDetector.tolerance = tolerance }
 
     // Snapshot télémétrie : le bouton arme un flag (lu/consommé par l'analyzer, qui
-    // produit alors un OutlineResult enrichi des candidats) ; snapshotBusy désactive
-    // le bouton le temps de la capture + envoi.
-    val activity = ctx.findActivity()
+    // produit alors un OutlineResult enrichi des candidats + un composite couleur) ;
+    // snapshotBusy désactive le bouton le temps de l'envoi.
+    val appVersion = remember {
+        runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: ""
+    }
     val snapshotPending = remember { AtomicBoolean(false) }
     var snapshotBusy by remember { mutableStateOf(false) }
+    // Auto-capture x10 : démarre quand bord externe (arrondi) ET interne (vif) sont
+    // détectés, capture AUTO_TARGET snapshots espacés, puis DONE ; ré-arme à la perte.
+    var autoState by remember { mutableStateOf(AutoCap.IDLE) }
+    var autoCount by remember { mutableStateOf(0) }
+    var lastAutoMs by remember { mutableStateOf(0L) }
 
     fun analyze() {
         if (analyzing) return
@@ -187,28 +188,15 @@ fun CameraScreen(
         )
     }
 
-    // Capture l'écran (photo + surcouche) et pousse le snapshot complet en télémétrie.
-    fun sendSnapshot(r: OutlineResult) {
-        val act = activity ?: run { snapshotBusy = false; return }
-        Handler(Looper.getMainLooper()).post {
-            captureWindow(act) { bmp ->
-                if (bmp == null) {
-                    snapshotBusy = false
-                    scope.launch { snackbar.showSnackbar("Capture écran impossible") }
-                    return@captureWindow
-                }
-                val appVersion = runCatching {
-                    act.packageManager.getPackageInfo(act.packageName, 0).versionName
-                }.getOrNull() ?: ""
-                scope.launch {
-                    val jpeg = withContext(Dispatchers.IO) { bitmapToJpeg(bmp, 1280, 80) }
-                    val err = withContext(Dispatchers.IO) {
-                        SnapshotClient.post(store.serverUrl, store.licenseKey, r, jpeg, tolerance, 0, appVersion)
-                    }
-                    snapshotBusy = false
-                    snackbar.showSnackbar(if (err == null) "Snapshot envoyé ✓" else "Snapshot : $err")
-                }
+    // Pousse le snapshot (composite couleur produit par le détecteur + diagnostics).
+    fun postSnapshot(r: OutlineResult, onResult: (String?) -> Unit) {
+        val jpeg = r.snapshotJpeg
+        if (jpeg == null) { onResult("image indisponible"); return }
+        scope.launch {
+            val err = withContext(Dispatchers.IO) {
+                SnapshotClient.post(store.serverUrl, store.licenseKey, r, jpeg, tolerance, 0, appVersion)
             }
+            onResult(err)
         }
     }
 
@@ -250,11 +238,39 @@ fun CameraScreen(
                                             val post = now - lastDebugPost.get() >= 1000L
                                             if (post) lastDebugPost.set(now)
                                             val wantSnap = snapshotPending.getAndSet(false)
-                                            val r = outlineDetector.detect(image, encodeDebug = post, snapshot = wantSnap)
+                                            val capturing = autoState == AutoCap.RUNNING
+                                            val r = outlineDetector.detect(
+                                                image, encodeDebug = post, snapshot = wantSnap || capturing,
+                                            )
                                             diag = r
                                             frames++
                                             if (post) DebugClient.post(store.serverUrl, store.licenseKey, frames, r)
-                                            if (wantSnap) sendSnapshot(r)
+                                            // Snapshot manuel.
+                                            if (wantSnap) postSnapshot(r) { err ->
+                                                snapshotBusy = false
+                                                scope.launch {
+                                                    snackbar.showSnackbar(
+                                                        if (err == null) "Snapshot envoyé ✓" else "Snapshot : $err",
+                                                    )
+                                                }
+                                            }
+                                            // Auto-capture x10 : déclenchée quand bord externe (arrondi)
+                                            // ET interne (vif) sont tous deux acceptés.
+                                            val both = r.quads.any { it.rounded } && r.quads.any { !it.rounded }
+                                            when (autoState) {
+                                                AutoCap.IDLE -> if (both) {
+                                                    autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
+                                                }
+                                                AutoCap.RUNNING -> if (both &&
+                                                    now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
+                                                ) {
+                                                    lastAutoMs = now
+                                                    autoCount += 1
+                                                    postSnapshot(r) { }
+                                                    if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
+                                                }
+                                                AutoCap.DONE -> if (!both) autoState = AutoCap.IDLE
+                                            }
                                         } finally {
                                             image.close()
                                         }
@@ -317,10 +333,30 @@ fun CameraScreen(
                     result = result,
                     modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                 )
+
+                if (autoState != AutoCap.IDLE) {
+                    val done = autoState == AutoCap.DONE
+                    Text(
+                        text = if (done) "DONE ✓" else "Capture $autoCount/$AUTO_TARGET",
+                        color = if (done) Color(0xFF00E676) else Color.White,
+                        style = MaterialTheme.typography.headlineMedium,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 96.dp)
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                    )
+                }
             }
         }
     }
 }
+
+/** États de l'auto-capture x10. */
+private enum class AutoCap { IDLE, RUNNING, DONE }
+
+private const val AUTO_TARGET = 10
+private const val AUTO_INTERVAL_MS = 400L
 
 /** Trace chaque parallélogramme (bord carte + cadre interne) : vert + milieux rouges + médianes + valeurs. */
 @Composable
@@ -379,49 +415,6 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
  * par une Bézier quadratique dont le point de contrôle est le coin d'origine. Le rayon
  * est borné à la moitié de l'arête la plus courte pour éviter le chevauchement.
  */
-/** Remonte la chaîne de Context pour trouver l'Activity hôte. */
-private fun Context.findActivity(): Activity? {
-    var c: Context? = this
-    while (c is ContextWrapper) {
-        if (c is Activity) return c
-        c = c.baseContext
-    }
-    return null
-}
-
-/**
- * Copie d'écran de la fenêtre (photo caméra + surcouche Compose) via PixelCopy.
- * Le callback est invoqué sur le main thread ; [onResult] reçoit null en cas d'échec.
- */
-private fun captureWindow(activity: Activity, onResult: (Bitmap?) -> Unit) {
-    val decor = activity.window.decorView
-    val w = decor.width
-    val h = decor.height
-    if (w <= 0 || h <= 0) { onResult(null); return }
-    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    try {
-        PixelCopy.request(activity.window, bmp, { result ->
-            onResult(if (result == PixelCopy.SUCCESS) bmp else null)
-        }, Handler(Looper.getMainLooper()))
-    } catch (e: IllegalArgumentException) {
-        onResult(null)
-    }
-}
-
-/** Downscale (plus grand côté ≤ [maxDim]) puis JPEG qualité [quality]. */
-private fun bitmapToJpeg(src: Bitmap, maxDim: Int, quality: Int): ByteArray {
-    val longest = if (src.width >= src.height) src.width else src.height
-    val scaled = if (longest > maxDim) {
-        val s = maxDim.toFloat() / longest
-        Bitmap.createScaledBitmap(src, (src.width * s).toInt(), (src.height * s).toInt(), true)
-    } else {
-        src
-    }
-    val out = ByteArrayOutputStream()
-    scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
-    return out.toByteArray()
-}
-
 private fun roundedQuadPath(pts: List<Offset>, r: Float): Path {
     val n = pts.size
     val path = Path()

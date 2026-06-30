@@ -60,6 +60,8 @@ data class OutlineResult(
     val debugJpeg: ByteArray? = null,
     /** Candidats diagnostiqués (snapshot uniquement). */
     val candidates: List<CardCandidate> = emptyList(),
+    /** Composite couleur (frame caméra + surcouche) pour le snapshot ; null hors snapshot. */
+    val snapshotJpeg: ByteArray? = null,
 )
 
 private class Cand(
@@ -139,6 +141,8 @@ class CardOutlineDetector {
             var diagQuadRatio = 0f
             val cands = ArrayList<Cand>()
             val candDiags = if (snapshot) ArrayList<CardCandidate>() else null
+            // Rects des candidats rejetés à dessiner sur le composite (snapshot).
+            val candDraw = if (snapshot) ArrayList<Pair<List<Point>, String>>() else null
 
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
@@ -190,7 +194,10 @@ class CardOutlineDetector {
                     else -> "ok"
                 }
                 candDiags?.add(CardCandidate(area, fill, ratio, portrait, rounded, reason == "ok", reason))
-                if (reason != "ok") continue
+                if (reason != "ok") {
+                    candDraw?.add(q to reason)
+                    continue
+                }
 
                 val cx = q.sumOf { it.x }.toFloat() / 4f
                 val cy = q.sumOf { it.y }.toFloat() / 4f
@@ -222,9 +229,22 @@ class CardOutlineDetector {
 
             val bestAreaPct = if (imgArea > 0) (diagArea / imgArea * 100).toInt() else 0
             val debugJpeg = if (encodeDebug) encodeDebugFrame(small, kept.map { it.reduced }, frameColor) else null
+            // Composite couleur pour le snapshot : vraie frame caméra + cadres acceptés
+            // (vert) + candidats rejetés (orange + raison). Remplace la copie d'écran
+            // (PixelCopy ne capture pas la Surface caméra → image noire).
+            val snapshotJpeg = if (snapshot) {
+                Imgproc.resize(rgbaFull, bgrSmall, small.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+                Imgproc.cvtColor(bgrSmall, bgrSmall, Imgproc.COLOR_RGBA2BGR)
+                encodeSnapshotFrame(
+                    bgrSmall, kept.map { it.reduced }, candDraw ?: emptyList(),
+                    contours.size, kept.size, bestAreaPct,
+                )
+            } else {
+                null
+            }
             return OutlineResult(
                 kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, frameColor, null,
-                debugJpeg, candDiags ?: emptyList(),
+                debugJpeg, candDiags ?: emptyList(), snapshotJpeg,
             )
         } catch (t: Throwable) {
             return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
@@ -261,6 +281,42 @@ class CardOutlineDetector {
 
     private fun shrink(pts: List<Point>, cx: Float, cy: Float, f: Float): List<Point> =
         pts.map { Point(cx + (it.x - cx) * f, cy + (it.y - cy) * f) }
+
+    /**
+     * Composite couleur du snapshot : frame caméra (BGR) + cadres acceptés (vert) +
+     * rects des candidats rejetés (orange) annotés de leur raison, + bandeau résumé.
+     */
+    private fun encodeSnapshotFrame(
+        colorBgr: Mat,
+        accepted: List<List<Point>>,
+        rejected: List<Pair<List<Point>, String>>,
+        contourCount: Int,
+        quadCount: Int,
+        bestAreaPct: Int,
+    ): ByteArray {
+        rejected.forEach { (corners, reason) ->
+            Imgproc.polylines(colorBgr, listOf(MatOfPoint(*corners.toTypedArray())), true, ORANGE, 2)
+            val c = corners.firstOrNull()
+            if (c != null) {
+                Imgproc.putText(
+                    colorBgr, reason, Point(c.x + 2, c.y - 4),
+                    Imgproc.FONT_HERSHEY_SIMPLEX, 0.45, ORANGE, 1,
+                )
+            }
+        }
+        accepted.forEach { corners ->
+            Imgproc.polylines(colorBgr, listOf(MatOfPoint(*corners.toTypedArray())), true, GREEN, 2)
+        }
+        Imgproc.putText(
+            colorBgr, "q=$quadCount cnt=$contourCount area=$bestAreaPct%",
+            Point(8.0, 18.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
+        )
+        val out = MatOfByte()
+        Imgcodecs.imencode(".jpg", colorBgr, out, MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 80))
+        val bytes = out.toArray()
+        out.release()
+        return bytes
+    }
 
     private fun encodeDebugFrame(small: Mat, quads: List<List<Point>>, frameColor: Int?): ByteArray {
         val color = Mat()
@@ -334,6 +390,7 @@ class CardOutlineDetector {
         private const val MAX_QUADS = 4
         private val GREEN = Scalar(0.0, 230.0, 118.0)
         private val RED = Scalar(0.0, 0.0, 255.0)
+        private val ORANGE = Scalar(0.0, 165.0, 255.0) // BGR
 
         @Volatile private var loaded = false
 
