@@ -254,14 +254,15 @@ fun CameraScreen(
                                                     )
                                                 }
                                             }
-                                            // Auto-capture x10 : déclenchée quand bord externe (arrondi)
-                                            // ET interne (vif) sont tous deux acceptés.
-                                            val both = r.quads.any { it.rounded } && r.quads.any { !it.rounded }
+                                            // Auto-capture x10 : déclenchée dès que la carte (bord
+                                            // extérieur arrondi) est détectée. L'intérieur est dessiné
+                                            // en plus quand il est trouvé.
+                                            val cardFound = r.quads.any { it.rounded }
                                             when (autoState) {
-                                                AutoCap.IDLE -> if (both) {
+                                                AutoCap.IDLE -> if (cardFound) {
                                                     autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
                                                 }
-                                                AutoCap.RUNNING -> if (both &&
+                                                AutoCap.RUNNING -> if (cardFound &&
                                                     now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
                                                 ) {
                                                     lastAutoMs = now
@@ -269,7 +270,7 @@ fun CameraScreen(
                                                     postSnapshot(r) { }
                                                     if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
                                                 }
-                                                AutoCap.DONE -> if (!both) autoState = AutoCap.IDLE
+                                                AutoCap.DONE -> if (!cardFound) autoState = AutoCap.IDLE
                                             }
                                         } finally {
                                             image.close()
@@ -387,7 +388,8 @@ private fun CardOutlineOverlay(quads: List<CardQuad>, modifier: Modifier) {
                     close()
                 }
             }
-            drawPath(path, color = Color(0xFF00E676), style = Stroke(width = 6f))
+            val stroke = if (quad.rounded) Color(0xFF00E676) else Color(0xFF2979FF) // ext vert / int bleu
+            drawPath(path, color = stroke, style = Stroke(width = 6f))
             drawLine(Color(0xCCFFEB3B), mids[0], mids[2], strokeWidth = 3f)
             drawLine(Color(0xCCFFEB3B), mids[1], mids[3], strokeWidth = 3f)
             mids.forEach { drawCircle(Color(0xFFFF1744), radius = 10f, center = it) }
