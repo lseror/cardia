@@ -265,7 +265,9 @@ fun CameraScreen(
                                                     autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
                                                     autoBatchId = "b" + System.currentTimeMillis()
                                                 }
-                                                AutoCap.RUNNING -> if (cardFound &&
+                                                // Un lot lancé capture ses 10 frames même si la
+                                                // détection lâche (utile pour le composite).
+                                                AutoCap.RUNNING -> if (
                                                     now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
                                                 ) {
                                                     lastAutoMs = now
@@ -315,6 +317,16 @@ fun CameraScreen(
                 ) {
                     Icon(Icons.Default.Settings, contentDescription = "Réglages", tint = Color.White)
                 }
+
+                Button(
+                    onClick = {
+                        autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
+                        autoBatchId = "b" + System.currentTimeMillis()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 210.dp),
+                ) { Text(if (autoState == AutoCap.RUNNING) "Acquisition… $autoCount/$AUTO_TARGET" else "▶ Lancer ×10") }
 
                 Button(
                     onClick = { if (!snapshotBusy) { snapshotBusy = true; snapshotPending.set(true) } },
