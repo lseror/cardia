@@ -61,6 +61,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.serortech.cardia.net.BenchClient
 import com.serortech.cardia.net.CaptureClient
 import com.serortech.cardia.net.DebugClient
 import com.serortech.cardia.net.SnapshotClient
@@ -149,6 +150,7 @@ fun CameraScreen(
     var autoState by remember { mutableStateOf(AutoCap.IDLE) }
     var autoCount by remember { mutableStateOf(0) }
     var lastAutoMs by remember { mutableStateOf(0L) }
+    var autoBatchId by remember { mutableStateOf("") }
 
     fun analyze() {
         if (analyzing) return
@@ -261,6 +263,7 @@ fun CameraScreen(
                                             when (autoState) {
                                                 AutoCap.IDLE -> if (cardFound) {
                                                     autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
+                                                    autoBatchId = "b" + System.currentTimeMillis()
                                                 }
                                                 AutoCap.RUNNING -> if (cardFound &&
                                                     now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
@@ -268,6 +271,8 @@ fun CameraScreen(
                                                     lastAutoMs = now
                                                     autoCount += 1
                                                     postSnapshot(r) { }
+                                                    // Envoi de la frame brute au banc (groupée par lot).
+                                                    r.rawJpeg?.let { BenchClient.post(autoBatchId, autoCount, it) }
                                                     if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
                                                 }
                                                 AutoCap.DONE -> if (!cardFound) autoState = AutoCap.IDLE
