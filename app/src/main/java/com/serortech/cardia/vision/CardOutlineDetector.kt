@@ -62,6 +62,8 @@ data class OutlineResult(
     val candidates: List<CardCandidate> = emptyList(),
     /** Composite couleur (frame caméra + surcouche) pour le snapshot ; null hors snapshot. */
     val snapshotJpeg: ByteArray? = null,
+    /** Frame caméra brute (couleur, sans surcouche) pour le diagnostic ; null hors snapshot. */
+    val rawJpeg: ByteArray? = null,
 )
 
 private class Cand(
@@ -232,19 +234,20 @@ class CardOutlineDetector {
             // Composite couleur pour le snapshot : vraie frame caméra + cadres acceptés
             // (vert) + candidats rejetés (orange + raison). Remplace la copie d'écran
             // (PixelCopy ne capture pas la Surface caméra → image noire).
-            val snapshotJpeg = if (snapshot) {
+            var snapshotJpeg: ByteArray? = null
+            var rawJpeg: ByteArray? = null
+            if (snapshot) {
                 Imgproc.resize(rgbaFull, bgrSmall, small.size(), 0.0, 0.0, Imgproc.INTER_AREA)
                 Imgproc.cvtColor(bgrSmall, bgrSmall, Imgproc.COLOR_RGBA2BGR)
-                encodeSnapshotFrame(
+                rawJpeg = encodeJpeg(bgrSmall)  // frame propre (diagnostic) AVANT surcouche
+                snapshotJpeg = encodeSnapshotFrame(
                     bgrSmall, kept.map { it.reduced }, candDraw ?: emptyList(),
                     contours.size, kept.size, bestAreaPct,
                 )
-            } else {
-                null
             }
             return OutlineResult(
                 kept.map { it.up }, true, contours.size, bestAreaPct, diagQuadRatio, frameColor, null,
-                debugJpeg, candDiags ?: emptyList(), snapshotJpeg,
+                debugJpeg, candDiags ?: emptyList(), snapshotJpeg, rawJpeg,
             )
         } catch (t: Throwable) {
             return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
@@ -311,8 +314,12 @@ class CardOutlineDetector {
             colorBgr, "q=$quadCount cnt=$contourCount area=$bestAreaPct%",
             Point(8.0, 18.0), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
         )
+        return encodeJpeg(colorBgr)
+    }
+
+    private fun encodeJpeg(mat: Mat): ByteArray {
         val out = MatOfByte()
-        Imgcodecs.imencode(".jpg", colorBgr, out, MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 80))
+        Imgcodecs.imencode(".jpg", mat, out, MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 80))
         val bytes = out.toArray()
         out.release()
         return bytes

@@ -43,6 +43,15 @@ object SnapshotClient {
                 put("mediaType", "image/jpeg")
                 put("data", Base64.encodeToString(jpeg, Base64.NO_WRAP))
             })
+            // Frame brute (sans surcouche) pour diagnostic. Champ hors "image" → le
+            // serveur la conserve telle quelle dans latest.json.
+            result.rawJpeg?.let {
+                put("rawImage", JSONObject().apply {
+                    put("kind", "base64")
+                    put("mediaType", "image/jpeg")
+                    put("data", Base64.encodeToString(it, Base64.NO_WRAP))
+                })
+            }
         }
         val req = Request.Builder()
             .url("$baseUrl/snapshot")
