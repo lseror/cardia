@@ -12,6 +12,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -53,6 +54,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var activated by remember { mutableStateOf(store.licenseKey.isNotBlank()) }
     var dailyLimit by remember { mutableStateOf(store.dailyLimit) }
     var working by remember { mutableStateOf(false) }
+    var sharpMin by remember { mutableStateOf(store.qualitySharpMin) }
 
     Scaffold(
         topBar = {
@@ -142,6 +144,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(if (working) "Activation…" else "Activer") }
             }
+
+            Text("Netteté minimale à l'acquisition : ${sharpMin.toInt()}", style = MaterialTheme.typography.titleSmall)
+            Slider(
+                value = sharpMin,
+                onValueChange = { sharpMin = it },
+                valueRange = 20f..800f,
+                onValueChangeFinished = { store.qualitySharpMin = sharpMin },
+            )
+            Text(
+                "Plus haut = plus exigeant (rejette plus de flou). Astuce : dans la caméra, vise une carte nette et touche « 🎯 Calibrer » pour le régler automatiquement.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             Text(
                 versionLabel,

@@ -48,6 +48,11 @@ class SettingsStore(ctx: Context) {
         get() = prefs.getFloat(KEY_RATIO_TOL, DEFAULT_RATIO_TOLERANCE)
         set(value) = prefs.edit { putFloat(KEY_RATIO_TOL, value) }
 
+    /** Seuil de netteté mini (variance du Laplacien) pour garder une frame à l'acquisition. */
+    var qualitySharpMin: Float
+        get() = prefs.getFloat(KEY_SHARP_MIN, DEFAULT_SHARP_MIN)
+        set(value) = prefs.edit { putFloat(KEY_SHARP_MIN, value) }
+
     /** Efface la licence (pour réactiver avec un nouveau code). */
     fun clearLicense() = prefs.edit {
         remove(KEY_LICENSE)
@@ -58,9 +63,13 @@ class SettingsStore(ctx: Context) {
         /** Tolérance par défaut sur le ratio (±) — voir CardOutlineDetector. */
         const val DEFAULT_RATIO_TOLERANCE = 0.05f
 
+        /** Seuil de netteté par défaut (à caler via le mode calibrage). */
+        const val DEFAULT_SHARP_MIN = 120f
+
         private const val KEY_LICENSE = "license_key"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_DAILY_LIMIT = "daily_limit"
         private const val KEY_RATIO_TOL = "ratio_tolerance"
+        private const val KEY_SHARP_MIN = "quality_sharp_min"
     }
 }

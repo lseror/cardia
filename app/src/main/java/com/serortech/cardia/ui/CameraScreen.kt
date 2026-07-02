@@ -134,6 +134,8 @@ fun CameraScreen(
     var frames by remember { mutableStateOf(0) }
     var tolerance by remember { mutableStateOf(store.ratioTolerance) }
     LaunchedEffect(Unit) { outlineDetector.tolerance = tolerance }
+    // Seuil de netteté (réglable ; calable via le mode calibrage).
+    var sharpMin by remember { mutableStateOf(store.qualitySharpMin) }
 
     // Snapshot télémétrie : le bouton arme un flag (lu/consommé par l'analyzer, qui
     // produit alors un OutlineResult enrichi des candidats + un composite couleur) ;
@@ -248,7 +250,7 @@ fun CameraScreen(
                                                 val outerQ = r.quads.firstOrNull { it.rounded }
                                                 val faceOk = outerQ != null &&
                                                     abs(outerQ.ratio - CardOutlineDetector.CARD_RATIO) <= QUALITY_RATIO_TOL
-                                                val sharpOk = (r.sharpness ?: 0f) >= SHARP_MIN
+                                                val sharpOk = (r.sharpness ?: 0f) >= sharpMin
                                                 // Après un délai, on assouplit pour garantir 10 frames
                                                 // (on privilégie les bonnes au début).
                                                 val relaxed = batchStartMs > 0 && now - batchStartMs > BATCH_RELAX_MS
@@ -298,12 +300,47 @@ fun CameraScreen(
                     FrameColorChip(c, modifier = Modifier.align(Alignment.TopEnd).padding(top = 56.dp, end = 8.dp))
                 }
 
+                // Calibrage : netteté live de la carte + seuil courant.
+                run {
+                    val s = diag?.sharpness
+                    val ratioTxt = diag?.quads?.firstOrNull { it.rounded }?.ratio
+                        ?.let { " · ratio %.2f".format(it) } ?: ""
+                    val sTxt = s?.toInt()?.toString() ?: "—"
+                    val ok = (s ?: 0f) >= sharpMin
+                    Text(
+                        text = "net $sTxt (seuil ${sharpMin.toInt()})$ratioTxt",
+                        color = if (ok) Color(0xFF00E676) else Color(0xFFFFAB40),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 8.dp)
+                            .background(Color(0xAA000000))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                }
+
                 IconButton(
                     onClick = onSettings,
                     modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
                 ) {
                     Icon(Icons.Default.Settings, contentDescription = "Réglages", tint = Color.White)
                 }
+
+                Button(
+                    onClick = {
+                        val s = diag?.sharpness
+                        if (s != null) {
+                            sharpMin = s * 0.8f            // seuil = 80% de la carte visée
+                            store.qualitySharpMin = sharpMin
+                            scope.launch { snackbar.showSnackbar("Seuil netteté = ${sharpMin.toInt()} (carte à ${s.toInt()})") }
+                        } else {
+                            scope.launch { snackbar.showSnackbar("Visez une carte nette pour calibrer") }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 270.dp),
+                ) { Text("🎯 Calibrer (net)") }
 
                 Button(
                     onClick = { startBatch() },
@@ -376,7 +413,6 @@ private const val AUTO_TARGET = 10
 private const val AUTO_INTERVAL_MS = 400L
 private const val QUAL_INTERVAL_MS = 150L      // espacement mini entre 2 frames gardées
 private const val QUALITY_RATIO_TOL = 0.06f    // écart max au ratio 63/88 (carte de face)
-private const val SHARP_MIN = 120f             // netteté mini (var Laplacien) — réglable
 private const val BATCH_RELAX_MS = 6000L       // au-delà, on capture même si qualité moindre
 
 /** Trace chaque parallélogramme (bord carte + cadre interne) : vert + milieux rouges + médianes + valeurs. */
