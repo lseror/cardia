@@ -151,6 +151,13 @@ fun CameraScreen(
     var autoCount by remember { mutableStateOf(0) }
     var lastAutoMs by remember { mutableStateOf(0L) }
     var autoBatchId by remember { mutableStateOf("") }
+    // Démarre un lot d'acquisition ×10 (bouton OU tap sur l'écran).
+    val startBatch = {
+        autoState = AutoCap.RUNNING
+        autoCount = 0
+        lastAutoMs = 0L
+        autoBatchId = "b" + System.currentTimeMillis()
+    }
 
     fun analyze() {
         if (analyzing) return
@@ -296,7 +303,7 @@ fun CameraScreen(
                         }, ContextCompat.getMainExecutor(c))
                         previewView
                     },
-                    modifier = Modifier.fillMaxSize().clickable { analyze() },
+                    modifier = Modifier.fillMaxSize().clickable { startBatch() },
                 )
 
                 CardOutlineOverlay(quads = diag?.quads ?: emptyList(), modifier = Modifier.fillMaxSize())
@@ -319,14 +326,11 @@ fun CameraScreen(
                 }
 
                 Button(
-                    onClick = {
-                        autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
-                        autoBatchId = "b" + System.currentTimeMillis()
-                    },
+                    onClick = { startBatch() },
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(start = 16.dp, bottom = 210.dp),
-                ) { Text(if (autoState == AutoCap.RUNNING) "Acquisition… $autoCount/$AUTO_TARGET" else "▶ Lancer ×10") }
+                ) { Text(if (autoState == AutoCap.RUNNING) "Acquisition… $autoCount/$AUTO_TARGET" else "▶ Lancer ×10 (ou touchez l'écran)") }
 
                 Button(
                     onClick = { if (!snapshotBusy) { snapshotBusy = true; snapshotPending.set(true) } },
