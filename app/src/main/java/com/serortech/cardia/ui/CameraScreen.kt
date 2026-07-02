@@ -62,11 +62,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.serortech.cardia.net.BenchClient
-import com.serortech.cardia.net.CaptureClient
 import com.serortech.cardia.net.DebugClient
 import com.serortech.cardia.net.SnapshotClient
 import com.serortech.cardia.settings.SettingsStore
-import com.serortech.cardia.vision.CardDetector
 import com.serortech.cardia.vision.CardOutlineDetector
 import com.serortech.cardia.vision.CardQuad
 import com.serortech.cardia.vision.OutlineResult
@@ -89,7 +87,6 @@ fun CameraScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val detector = remember { CardDetector(ctx) }
     val outlineDetector = remember { CardOutlineDetector() }
     val store = remember { SettingsStore(ctx) }
     val lastDebugPost = remember { AtomicLong(0L) }
@@ -159,43 +156,8 @@ fun CameraScreen(
         autoBatchId = "b" + System.currentTimeMillis()
     }
 
-    fun analyze() {
-        if (analyzing) return
-        analyzing = true
-        result = null
-        imageCapture.takePicture(
-            ContextCompat.getMainExecutor(ctx),
-            object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    val jpeg = image.toJpegBytes()
-                    image.close()
-                    scope.launch {
-                        try {
-                            val small = downscaleJpeg(jpeg, 768)
-                            // 1) Sauvegarde S3 AVANT identification.
-                            try {
-                                CaptureClient.upload(store.serverUrl, store.licenseKey, small)
-                            } catch (e: Exception) {
-                                snackbar.showSnackbar("Sauvegarde S3 : ${e.message}")
-                            }
-                            // 2) Identification (reste affichée jusqu'à la prochaine).
-                            result = detector.detect(small)
-                        } catch (e: Exception) {
-                            result = null
-                            snackbar.showSnackbar(e.message ?: "Échec de la détection")
-                        } finally {
-                            analyzing = false
-                        }
-                    }
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    analyzing = false
-                    scope.launch { snackbar.showSnackbar("Capture impossible.") }
-                }
-            },
-        )
-    }
+    // LLM (identification OpenAI) débranché : plus d'appel réseau d'identification.
+    // On ne fait qu'acquérir des photos (bouton/tap → startBatch → envoi au banc).
 
     // Pousse le snapshot (composite couleur produit par le détecteur + diagnostics).
     fun postSnapshot(r: OutlineResult, onResult: (String?) -> Unit) {
@@ -263,28 +225,17 @@ fun CameraScreen(
                                                     )
                                                 }
                                             }
-                                            // Auto-capture x10 : déclenchée dès que la carte (bord
-                                            // extérieur arrondi) est détectée. L'intérieur est dessiné
-                                            // en plus quand il est trouvé.
-                                            val cardFound = r.quads.any { it.rounded }
-                                            when (autoState) {
-                                                AutoCap.IDLE -> if (cardFound) {
-                                                    autoState = AutoCap.RUNNING; autoCount = 0; lastAutoMs = 0L
-                                                    autoBatchId = "b" + System.currentTimeMillis()
-                                                }
-                                                // Un lot lancé capture ses 10 frames même si la
-                                                // détection lâche (utile pour le composite).
-                                                AutoCap.RUNNING -> if (
-                                                    now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
-                                                ) {
-                                                    lastAutoMs = now
-                                                    autoCount += 1
-                                                    postSnapshot(r) { }
-                                                    // Envoi de la frame brute au banc (groupée par lot).
-                                                    r.rawJpeg?.let { BenchClient.post(autoBatchId, autoCount, it) }
-                                                    if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
-                                                }
-                                                AutoCap.DONE -> if (!cardFound) autoState = AutoCap.IDLE
+                                            // Acquisition ×10 démarrée UNIQUEMENT au tap/bouton
+                                            // (startBatch) — plus de déclenchement automatique. Un lot
+                                            // en cours capture ses 10 frames et les envoie au banc.
+                                            if (autoState == AutoCap.RUNNING &&
+                                                now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
+                                            ) {
+                                                lastAutoMs = now
+                                                autoCount += 1
+                                                postSnapshot(r) { }
+                                                r.rawJpeg?.let { BenchClient.post(autoBatchId, autoCount, it) }
+                                                if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
                                             }
                                         } finally {
                                             image.close()
