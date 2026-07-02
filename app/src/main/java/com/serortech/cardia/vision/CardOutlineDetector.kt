@@ -7,6 +7,7 @@ import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfByte
+import org.opencv.core.MatOfDouble
 import org.opencv.core.MatOfInt
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
@@ -58,6 +59,8 @@ data class OutlineResult(
     val candidates: List<CardCandidate> = emptyList(),
     val snapshotJpeg: ByteArray? = null,
     val rawJpeg: ByteArray? = null,
+    /** Netteté de la carte (variance du Laplacien) ; null si pas de carte. */
+    val sharpness: Float? = null,
 )
 
 /** Candidat en cours d'évaluation : coins en coords « small » (portrait) + quad upright. */
@@ -260,9 +263,14 @@ class CardOutlineDetector {
                     contourCount, quads.size, bestAreaPct,
                 )
             }
+            val sharpness = if (outer != null) {
+                try { cropSharpness(gray, outer.corners) } catch (t: Throwable) { null }
+            } else {
+                null
+            }
             return OutlineResult(
                 quads, true, contourCount, bestAreaPct, diagQuadRatio, frameColor, null,
-                null, candDiags ?: emptyList(), snapshotJpeg, rawJpeg,
+                null, candDiags ?: emptyList(), snapshotJpeg, rawJpeg, sharpness,
             )
         } catch (t: Throwable) {
             return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
@@ -418,10 +426,30 @@ class CardOutlineDetector {
     private fun kernel(n: Int): Mat =
         Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(n.toDouble(), n.toDouble()))
 
+    /** Netteté = variance du Laplacien sur la carte (boîte englobante des coins). */
+    private fun cropSharpness(gray: Mat, corners: List<Point>): Float {
+        val x0 = corners.minOf { it.x }.toInt().coerceIn(0, gray.cols() - 1)
+        val y0 = corners.minOf { it.y }.toInt().coerceIn(0, gray.rows() - 1)
+        val x1 = corners.maxOf { it.x }.toInt().coerceIn(x0 + 1, gray.cols())
+        val y1 = corners.maxOf { it.y }.toInt().coerceIn(y0 + 1, gray.rows())
+        val crop = gray.submat(y0, y1, x0, x1)
+        val lap = Mat()
+        val mean = MatOfDouble()
+        val std = MatOfDouble()
+        try {
+            Imgproc.Laplacian(crop, lap, CvType.CV_64F)
+            Core.meanStdDev(lap, mean, std)
+            val s = std.get(0, 0)[0]
+            return (s * s).toFloat()
+        } finally {
+            lap.release(); mean.release(); std.release()
+        }
+    }
+
     companion object {
         private const val WORK = 640
         private const val MIN_AREA_RATIO = 0.05
-        private const val CARD_RATIO = 63f / 88f
+        const val CARD_RATIO = 63f / 88f
         const val DEFAULT_TOLERANCE = 0.05f
         const val CARD_CORNER_RADIUS_FRAC = 0.048f
         private const val FILL_MIN = 0.82

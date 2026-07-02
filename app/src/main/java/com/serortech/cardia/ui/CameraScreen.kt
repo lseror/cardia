@@ -75,6 +75,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -152,6 +153,8 @@ fun CameraScreen(
     // touch d'après = nouvelle carte (recto). Les 2 lots partagent le sessionId.
     var sessionId by remember { mutableStateOf("") }
     var captureSide by remember { mutableStateOf("recto") }
+    var batchStartMs by remember { mutableStateOf(0L) }
+    var autoHint by remember { mutableStateOf("") }   // pourquoi ça n'avance pas
     val startBatch = {
         if (autoState != AutoCap.RUNNING) {   // on ne relance pas au milieu d'un lot
             if (autoState == AutoCap.DONE && captureSide == "recto") {
@@ -163,6 +166,8 @@ fun CameraScreen(
             autoBatchId = sessionId + "_" + captureSide
             autoCount = 0
             lastAutoMs = 0L
+            batchStartMs = System.currentTimeMillis()
+            autoHint = ""
             autoState = AutoCap.RUNNING
         }
     }
@@ -236,17 +241,30 @@ fun CameraScreen(
                                                     )
                                                 }
                                             }
-                                            // Acquisition ×10 démarrée UNIQUEMENT au tap/bouton
-                                            // (startBatch) — plus de déclenchement automatique. Un lot
-                                            // en cours capture ses 10 frames et les envoie au banc.
-                                            if (autoState == AutoCap.RUNNING &&
-                                                now - lastAutoMs >= AUTO_INTERVAL_MS && autoCount < AUTO_TARGET
-                                            ) {
-                                                lastAutoMs = now
-                                                autoCount += 1
-                                                postSnapshot(r) { }
-                                                r.rawJpeg?.let { BenchClient.post(autoBatchId, autoCount, it) }
-                                                if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
+                                            // Acquisition ×10 (tap/bouton) : on ne garde QUE les
+                                            // frames intéressantes — carte bien de face (ratio proche
+                                            // de 63/88, donc pas de perspective) ET nette.
+                                            if (autoState == AutoCap.RUNNING && autoCount < AUTO_TARGET) {
+                                                val outerQ = r.quads.firstOrNull { it.rounded }
+                                                val faceOk = outerQ != null &&
+                                                    abs(outerQ.ratio - CardOutlineDetector.CARD_RATIO) <= QUALITY_RATIO_TOL
+                                                val sharpOk = (r.sharpness ?: 0f) >= SHARP_MIN
+                                                // Après un délai, on assouplit pour garantir 10 frames
+                                                // (on privilégie les bonnes au début).
+                                                val relaxed = batchStartMs > 0 && now - batchStartMs > BATCH_RELAX_MS
+                                                autoHint = when {
+                                                    relaxed -> ""
+                                                    !faceOk -> "cadrez la carte bien de face"
+                                                    !sharpOk -> "stabilisez — plus net"
+                                                    else -> ""
+                                                }
+                                                if ((faceOk && sharpOk || relaxed) && now - lastAutoMs >= QUAL_INTERVAL_MS) {
+                                                    lastAutoMs = now
+                                                    autoCount += 1
+                                                    postSnapshot(r) { }
+                                                    r.rawJpeg?.let { BenchClient.post(autoBatchId, autoCount, it) }
+                                                    if (autoCount >= AUTO_TARGET) autoState = AutoCap.DONE
+                                                }
                                             }
                                         } finally {
                                             image.close()
@@ -330,7 +348,8 @@ fun CameraScreen(
                     val done = autoState == AutoCap.DONE
                     val sideLabel = captureSide.uppercase()
                     val txt = when {
-                        !done -> "$sideLabel $autoCount/$AUTO_TARGET"
+                        !done -> "$sideLabel $autoCount/$AUTO_TARGET" +
+                            if (autoHint.isNotEmpty()) " · $autoHint" else ""
                         captureSide == "recto" -> "RECTO OK ✓ — touchez pour le VERSO"
                         else -> "RECTO + VERSO OK ✓"
                     }
@@ -355,6 +374,10 @@ private enum class AutoCap { IDLE, RUNNING, DONE }
 
 private const val AUTO_TARGET = 10
 private const val AUTO_INTERVAL_MS = 400L
+private const val QUAL_INTERVAL_MS = 150L      // espacement mini entre 2 frames gardées
+private const val QUALITY_RATIO_TOL = 0.06f    // écart max au ratio 63/88 (carte de face)
+private const val SHARP_MIN = 120f             // netteté mini (var Laplacien) — réglable
+private const val BATCH_RELAX_MS = 6000L       // au-delà, on capture même si qualité moindre
 
 /** Trace chaque parallélogramme (bord carte + cadre interne) : vert + milieux rouges + médianes + valeurs. */
 @Composable
