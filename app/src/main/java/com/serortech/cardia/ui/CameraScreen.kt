@@ -148,12 +148,23 @@ fun CameraScreen(
     var autoCount by remember { mutableStateOf(0) }
     var lastAutoMs by remember { mutableStateOf(0L) }
     var autoBatchId by remember { mutableStateOf("") }
-    // Démarre un lot d'acquisition ×10 (bouton OU tap sur l'écran).
+    // Session recto/verso : 1er touch = recto (10), touch suivant = verso (10),
+    // touch d'après = nouvelle carte (recto). Les 2 lots partagent le sessionId.
+    var sessionId by remember { mutableStateOf("") }
+    var captureSide by remember { mutableStateOf("recto") }
     val startBatch = {
-        autoState = AutoCap.RUNNING
-        autoCount = 0
-        lastAutoMs = 0L
-        autoBatchId = "b" + System.currentTimeMillis()
+        if (autoState != AutoCap.RUNNING) {   // on ne relance pas au milieu d'un lot
+            if (autoState == AutoCap.DONE && captureSide == "recto") {
+                captureSide = "verso"                       // recto terminé → verso
+            } else {
+                sessionId = "s" + System.currentTimeMillis()
+                captureSide = "recto"                       // nouvelle carte
+            }
+            autoBatchId = sessionId + "_" + captureSide
+            autoCount = 0
+            lastAutoMs = 0L
+            autoState = AutoCap.RUNNING
+        }
     }
 
     // LLM (identification OpenAI) débranché : plus d'appel réseau d'identification.
@@ -281,7 +292,15 @@ fun CameraScreen(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(start = 16.dp, bottom = 210.dp),
-                ) { Text(if (autoState == AutoCap.RUNNING) "Acquisition… $autoCount/$AUTO_TARGET" else "▶ Lancer ×10 (ou touchez l'écran)") }
+                ) {
+                    Text(
+                        when {
+                            autoState == AutoCap.RUNNING -> "${captureSide.uppercase()} $autoCount/$AUTO_TARGET"
+                            autoState == AutoCap.DONE && captureSide == "recto" -> "▶ Touchez pour le VERSO"
+                            else -> "▶ Touchez pour le RECTO"
+                        },
+                    )
+                }
 
                 Button(
                     onClick = { if (!snapshotBusy) { snapshotBusy = true; snapshotPending.set(true) } },
@@ -309,10 +328,16 @@ fun CameraScreen(
 
                 if (autoState != AutoCap.IDLE) {
                     val done = autoState == AutoCap.DONE
+                    val sideLabel = captureSide.uppercase()
+                    val txt = when {
+                        !done -> "$sideLabel $autoCount/$AUTO_TARGET"
+                        captureSide == "recto" -> "RECTO OK ✓ — touchez pour le VERSO"
+                        else -> "RECTO + VERSO OK ✓"
+                    }
                     Text(
-                        text = if (done) "DONE ✓" else "Capture $autoCount/$AUTO_TARGET",
+                        text = txt,
                         color = if (done) Color(0xFF00E676) else Color.White,
-                        style = MaterialTheme.typography.headlineMedium,
+                        style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .padding(top = 96.dp)
