@@ -101,6 +101,7 @@ class CardOutlineDetector {
         val hsv = Mat()
         val sat = Mat()
         val satMask = Mat()
+        val valueMask = Mat()
         val edges = Mat()
         try {
             // Plan RGBA -> Mat (robuste au rowStride).
@@ -147,6 +148,10 @@ class CardOutlineDetector {
             Imgproc.threshold(sat, satMask, 0.0, 255.0, Imgproc.THRESH_BINARY + Imgproc.THRESH_OTSU)
             Imgproc.morphologyEx(satMask, satMask, Imgproc.MORPH_CLOSE, kernel(15))
             Imgproc.morphologyEx(satMask, satMask, Imgproc.MORPH_OPEN, kernel(7))
+            // Masque valeur (carte claire vs fond sombre) — cartes bord gris sur fond foncé.
+            Imgproc.threshold(gray, valueMask, 0.0, 255.0, Imgproc.THRESH_BINARY + Imgproc.THRESH_OTSU)
+            Imgproc.morphologyEx(valueMask, valueMask, Imgproc.MORPH_CLOSE, kernel(15))
+            Imgproc.morphologyEx(valueMask, valueMask, Imgproc.MORPH_OPEN, kernel(9))
             // Edges (secours, robustes à un fond coloré).
             Imgproc.GaussianBlur(gray, blur, Size(5.0, 5.0), 0.0)
             Imgproc.Canny(blur, edges, 50.0, 150.0)
@@ -160,8 +165,8 @@ class CardOutlineDetector {
             var contourCount = 0
             val cands = ArrayList<Cand>()
 
-            // 2) EXTÉRIEUR : candidats depuis saturation PUIS edges.
-            for (src in listOf(satMask, edges)) {
+            // 2) EXTÉRIEUR : candidats depuis saturation, valeur, PUIS edges.
+            for (src in listOf(satMask, valueMask, edges)) {
                 val cs = ArrayList<MatOfPoint>()
                 val hi = Mat()
                 Imgproc.findContours(src, cs, hi, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
@@ -210,6 +215,7 @@ class CardOutlineDetector {
 
                     val reason = when {
                         segA <= 0f || segB <= 0f -> "degenerate"
+                        rectArea > MAX_AREA_RATIO * imgArea -> "toobig"  // quasi pleine image = fond
                         fill < FILL_MIN -> "fill"
                         !portrait -> "portrait"
                         abs(ratio - CARD_RATIO) > tolerance -> "ratio"
@@ -276,7 +282,7 @@ class CardOutlineDetector {
             return OutlineResult(emptyList(), true, 0, 0, 0f, null, t.javaClass.simpleName + ": " + (t.message ?: ""))
         } finally {
             rgbaSensor.release(); rgba.release(); bgr.release(); gray.release(); blur.release()
-            hsv.release(); sat.release(); satMask.release(); edges.release()
+            hsv.release(); sat.release(); satMask.release(); valueMask.release(); edges.release()
         }
     }
 
@@ -449,6 +455,7 @@ class CardOutlineDetector {
     companion object {
         private const val WORK = 640
         private const val MIN_AREA_RATIO = 0.05
+        private const val MAX_AREA_RATIO = 0.85
         const val CARD_RATIO = 63f / 88f
         const val DEFAULT_TOLERANCE = 0.05f
         const val CARD_CORNER_RADIUS_FRAC = 0.048f
